@@ -1,0 +1,66 @@
+name: Windows release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+
+env:
+  ARCHIVE: tracking-windows-x64.zip
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build Windows x64
+        run: |
+          rustup target add $env:TARGET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --locked -p app-desktop --target $env:TARGET
+      - name: Package executable
+        run: Compress-Archive -LiteralPath "target/$env:TARGET/release/tracking-desktop.exe", LICENSE -DestinationPath $env:ARCHIVE
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tracking-windows-x64
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+
+  publish:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: tracking-windows-x64
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if release=$(gh release view "$RELEASE_TAG" --json isDraft,assets); then
+            if ! jq -e --arg name "$ARCHIVE" '.assets | any(.name == $name and .state == "uploaded")' <<< "$release" >/dev/null; then
+              gh release upload "$RELEASE_TAG" "$ARCHIVE" --clobber
+            fi
+            if jq -e '.isDraft' <<< "$release" >/dev/null; then
+              gh release edit "$RELEASE_TAG" --draft=false --verify-tag
+            fi
+          else
+            gh release create "$RELEASE_TAG" "$ARCHIVE" --verify-tag --generate-notes
+          fi

@@ -38,6 +38,19 @@ trunk serve --locked
 отдельно для каждого origin. Эти данные пока не синхронизируются между
 сборками.
 
+## Релизы Windows
+
+Отправьте тег `v*`, чтобы GitHub Actions собрал Windows x64 и опубликовал
+`tracking-windows-x64.zip` с `tracking-desktop.exe` в GitHub Releases.
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Для пробной сборки запустите **Windows release** вручную в GitHub Actions.
+ZIP будет доступен в артефактах запуска.
+
 ## Импорт и экспорт
 
 Откройте **Настройки → Импорт JSON**, чтобы загрузить архив v1 или v2.
