@@ -1,0 +1,15 @@
+[package]
+name = "app-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+app-platform.workspace = true
+chrono.workspace = true
+egui.workspace = true
+tracking-core.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

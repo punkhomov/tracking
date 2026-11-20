@@ -1,0 +1,25 @@
+[package]
+name = "app-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "tracking-desktop"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+app-platform.workspace = true
+app-ui.workspace = true
+chrono.workspace = true
+directories = "6"
+eframe = { workspace = true, features = ["accesskit", "x11", "wayland"] }
+notify-rust = "4"
+rfd = "0.18"
+tempfile = "3"
+tracking-core.workspace = true
+tracking-data.workspace = true
+
+[lints]
+workspace = true

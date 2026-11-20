@@ -1,0 +1,43 @@
+name: Tracking checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  desktop:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux window dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - run: cargo build --locked -p app-desktop
+      - run: cargo test --locked -p tracking-core -p tracking-data
+      - run: cargo clippy --locked -p app-desktop -p app-ui -p tracking-core --all-targets -- -D warnings
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32-unknown-unknown
+      - run: cargo fmt --all -- --check
+      - name: Verify portable dependency boundaries
+        shell: bash
+        run: |
+          core=$(cargo tree --locked --target wasm32-unknown-unknown -e normal -p tracking-core --prefix none)
+          web=$(cargo tree --locked --target wasm32-unknown-unknown -e normal -p app-web --prefix none)
+          if grep -Eq '^(egui|eframe|winit|rusqlite|web-sys) v' <<< "$core" ||
+             grep -Eq '^(gpui|tracking-data|rusqlite|winit) v' <<< "$web"; then
+            echo "A platform or UI dependency crossed a workspace boundary"
+            exit 1
+          fi
+      - run: cargo clippy --locked -p app-web --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo install --locked --version 0.22.2 trunk
+      - run: trunk build --release --locked
+        working-directory: apps/web
