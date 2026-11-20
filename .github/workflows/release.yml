@@ -24,6 +24,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Build Windows x64
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
         run: |
           rustup target add $env:TARGET
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
