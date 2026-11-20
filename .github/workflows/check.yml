@@ -33,7 +33,7 @@ jobs:
           core=$(cargo tree --locked --target wasm32-unknown-unknown -e normal -p tracking-core --prefix none)
           web=$(cargo tree --locked --target wasm32-unknown-unknown -e normal -p app-web --prefix none)
           if grep -Eq '^(egui|eframe|winit|rusqlite|web-sys) v' <<< "$core" ||
-             grep -Eq '^(gpui|tracking-data|rusqlite|winit) v' <<< "$web"; then
+             grep -Eq '^(tracking-data|rusqlite|winit) v' <<< "$web"; then
             echo "A platform or UI dependency crossed a workspace boundary"
             exit 1
           fi
