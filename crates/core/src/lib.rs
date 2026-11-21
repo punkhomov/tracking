@@ -1,4 +1,5 @@
 mod archive;
+pub mod merge;
 pub mod reports;
 mod state;
 mod timer;

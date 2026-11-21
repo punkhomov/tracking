@@ -17,11 +17,16 @@ required-features = ["bindgen"]
 
 [dependencies]
 anyhow.workspace = true
+app-platform.workspace = true
 chrono.workspace = true
+chrono-tz = "0.10"
 thiserror = "2"
+tokio = { version = "1", features = ["rt"] }
+tracking-cloud.workspace = true
 tracking-core.workspace = true
 tracking-data.workspace = true
 uniffi = { version = "0.32.2", default-features = false }
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

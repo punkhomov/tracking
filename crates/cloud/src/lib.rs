@@ -1,23 +1,28 @@
-mod merge;
+mod realtime;
+#[cfg(test)]
+mod tests;
 
 use std::{fmt, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use app_platform::cloud::{
-    Account, CloudRequest, CloudResponse, Connection, Preference, SyncPoint,
+    Account, CloudRequest, CloudResponse, Connection, Preference, SyncPoint, TimerSnapshot,
+    TimerUpdate,
 };
 use chrono::Utc;
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::json;
-use tracking_core::Dataset;
+use tracking_core::{
+    Dataset,
+    merge::{Conflict, merge},
+};
 use uuid::Uuid;
-
-use crate::merge::{Conflict, merge};
 
 #[derive(Default)]
 pub struct Service {
     signed_in: Option<(Supabase, Session)>,
+    realtime: realtime::Subscription,
 }
 
 impl Service {
@@ -35,6 +40,7 @@ impl Service {
                 let client = Supabase::new(&connection)?;
                 let session = client.verify_code(&email, &code).await?;
                 let account = client.account(&session);
+                self.realtime = Default::default();
                 self.signed_in = Some((client, session));
                 Ok(CloudResponse::SignedIn(account))
             }
@@ -61,6 +67,7 @@ impl Service {
                     }))),
                     Err(error) if error.is::<AuthRequired>() => {
                         self.signed_in = None;
+                        self.realtime = Default::default();
                         Ok(CloudResponse::SessionExpired)
                     }
                     Err(error) => match error.downcast_ref::<Conflict>() {
@@ -69,8 +76,37 @@ impl Service {
                     },
                 }
             }
+            CloudRequest::SyncTimer { account, update } => {
+                let Some((client, session)) = &mut self.signed_in else {
+                    return Ok(CloudResponse::SessionExpired);
+                };
+                if client.account(session) != account {
+                    return Ok(CloudResponse::SessionExpired);
+                }
+                let submitted = update.as_ref().map(|update| update.change.id);
+                match client.sync_timer(session, update).await {
+                    Ok(snapshot) => Ok(CloudResponse::TimerSynchronized {
+                        account,
+                        snapshot,
+                        submitted,
+                    }),
+                    Err(error) if error.is::<AuthRequired>() => {
+                        self.signed_in = None;
+                        self.realtime = Default::default();
+                        Ok(CloudResponse::SessionExpired)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            CloudRequest::PollRealtime => {
+                let changed = self.signed_in.as_ref().is_some_and(|(client, session)| {
+                    self.realtime.poll(&client.url, &client.key, session)
+                });
+                Ok(CloudResponse::RealtimeChanged(changed))
+            }
             CloudRequest::SignOut => {
                 self.signed_in = None;
+                self.realtime = Default::default();
                 Ok(CloudResponse::SignedOut)
             }
         }
@@ -219,6 +255,44 @@ impl Supabase {
             }
         }
         bail!("Облачная копия обновилась во время синхронизации. Повторите попытку.")
+    }
+
+    async fn sync_timer(
+        &self,
+        session: &mut Session,
+        update: Option<TimerUpdate>,
+    ) -> Result<TimerSnapshot> {
+        self.refresh(session).await?;
+        let request = if let Some(update) = &update {
+            let change = &update.change;
+            self.request(reqwest::Method::POST, "rest/v1/rpc/tracking_apply_timer")
+                .json(&json!({
+                    "expected_revision": update.revision,
+                    "operation_id": change.id,
+                    "next_timer": change.timer,
+                    "selected_kind": change.next_kind,
+                    "finished_id": change.finished.as_ref().map(|(id, _)| id),
+                    "finished_period": change.finished.as_ref().map(|(_, period)| period),
+                }))
+        } else {
+            self.request(reqwest::Method::GET, "rest/v1/tracking_timer")
+                .query(&[
+                    ("select", "revision,change_id,timer,next_kind"),
+                    ("user_id", &format!("eq.{}", session.user.id)),
+                ])
+        };
+        let rows: Vec<TimerSnapshot> =
+            checked(request.bearer_auth(&session.access_token).send().await)
+                .await?
+                .json()
+                .await?;
+        let mut rows = rows.into_iter();
+        let snapshot = rows.next();
+        ensure!(
+            rows.next().is_none() && (update.is_none() || snapshot.is_some()),
+            "Некорректный ответ Supabase о таймере."
+        );
+        Ok(snapshot.unwrap_or_default())
     }
 
     async fn read(&self, session: &Session) -> Result<Option<CloudRow>> {

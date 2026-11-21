@@ -3,9 +3,15 @@ use std::{
     fmt,
 };
 
-use app_platform::cloud::Preference;
-use tracking_core::Dataset;
+use crate::Dataset;
 use uuid::Uuid;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Preference {
+    Ask,
+    Local,
+    Remote,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Conflict {
@@ -121,7 +127,7 @@ fn choose<'a, T: Eq>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracking_core::Category;
+    use crate::Category;
 
     #[test]
     fn independent_changes_and_deletes_merge_and_same_record_changes_conflict() {

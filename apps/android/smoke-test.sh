@@ -19,3 +19,4 @@ run_test() {
 run_test startSession
 adb shell am force-stop "$app"
 run_test restoreAndFinishSession
+run_test createAndArchiveCategory

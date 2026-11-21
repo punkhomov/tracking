@@ -1,11 +1,11 @@
 use std::sync::mpsc;
 
 use app_platform::cloud::{
-    Account, CloudRequest, CloudResponse, CloudState, Connection, Preference, Setup,
+    Account, CloudRequest, CloudResponse, CloudState, Connection, Preference, Setup, SyncSchedule,
 };
 use chrono::{DateTime, Utc};
 use egui::{Context, TextEdit, Ui};
-use tracking_core::Command;
+use tracking_core::Dataset;
 
 use crate::{
     Tracker,
@@ -26,6 +26,7 @@ pub(crate) struct CloudPanel {
     conflict: Option<usize>,
     error: Option<String>,
     status: Option<&'static str>,
+    pub(crate) schedule: SyncSchedule,
 }
 
 #[derive(Default)]
@@ -36,7 +37,17 @@ struct ConnectionDraft {
 
 struct Pending {
     result: mpsc::Receiver<Result<CloudResponse, String>>,
-    sync: bool,
+    kind: PendingKind,
+}
+
+enum PendingKind {
+    Account,
+    Dataset {
+        submitted: Box<Dataset>,
+        manual: bool,
+    },
+    Timer,
+    Realtime,
 }
 
 enum Action {
@@ -58,11 +69,17 @@ impl CloudPanel {
             conflict: None,
             error: None,
             status: None,
+            schedule: SyncSchedule::default(),
         }
     }
 
     pub(crate) fn syncing(&self) -> bool {
-        self.pending.as_ref().is_some_and(|pending| pending.sync)
+        self.pending.as_ref().is_some_and(|pending| {
+            matches!(
+                pending.kind,
+                PendingKind::Dataset { .. } | PendingKind::Timer
+            )
+        })
     }
 
     pub(crate) fn saved(&mut self, state: CloudState) {
@@ -70,8 +87,8 @@ impl CloudPanel {
             self.clear_login();
             self.error = None;
             self.status = None;
+            self.draft = None;
         }
-        self.draft = None;
         self.state = state;
     }
 
@@ -80,6 +97,7 @@ impl CloudPanel {
         self.code_sent = false;
         self.code.clear();
         self.conflict = None;
+        self.schedule = SyncSchedule::default();
     }
 
     fn content(&mut self, ui: &mut Ui) -> Option<Action> {
@@ -90,10 +108,12 @@ impl CloudPanel {
         if let Some(status) = self.status {
             ui.label(status);
         }
-        if let Some(pending) = &self.pending {
+        if let Some(pending) = &self.pending
+            && !matches!(pending.kind, PendingKind::Realtime)
+        {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(if pending.sync {
+                ui.label(if self.syncing() {
                     "Синхронизация…"
                 } else {
                     "Запрос к Supabase…"
@@ -148,6 +168,27 @@ impl CloudPanel {
         ui.label(connection.url());
         if let Some(account) = &self.account {
             ui.label(format!("Вход выполнен как {}", self.email));
+            if !self.state.timer.allows_account(account) {
+                ui.label("На устройстве есть действия с таймером другого аккаунта.");
+                return ui
+                    .button("Выйти на этом устройстве")
+                    .clicked()
+                    .then_some(Action::Request(CloudRequest::SignOut));
+            }
+            if self.state.timer.has_conflict() {
+                ui.label("Общий таймер изменился на другом устройстве. Локальные действия сохранены. Синхронизация приостановлена.");
+                return ui
+                    .button("Выйти на этом устройстве")
+                    .clicked()
+                    .then_some(Action::Request(CloudRequest::SignOut));
+            }
+            if self.state.timer.is_pending() {
+                ui.label("Таймер ожидает синхронизации.");
+                return ui
+                    .button("Выйти на этом устройстве")
+                    .clicked()
+                    .then_some(Action::Request(CloudRequest::SignOut));
+            }
             if let Some(count) = self.conflict {
                 ui.label(format!(
                     "Конфликтующих изменений: {count}. Выберите версию для этих записей."
@@ -166,11 +207,7 @@ impl CloudPanel {
                 });
                 return choice;
             }
-            let changed = self
-                .state
-                .last_sync
-                .as_ref()
-                .is_some_and(|point| point.account != *account);
+            let changed = !self.state.matches_account(account);
             if changed {
                 ui.label("Локальные данные ранее синхронизировались с другим аккаунтом. Подтвердите объединение с этим аккаунтом.");
             }
@@ -281,13 +318,12 @@ impl Tracker {
     pub(crate) fn cloud_settings(&mut self, ui: &mut Ui) {
         card(ui, |ui| match self.cloud.content(ui) {
             Some(Action::Setup(setup)) => self.set_cloud_setup(setup, ui.ctx()),
-            Some(Action::Request(request)) => self.request_cloud(request, ui.ctx()),
+            Some(Action::Request(request)) => self.request_cloud(request, true, ui.ctx()),
             Some(Action::Synchronize(preference)) => self.request_cloud(
-                CloudRequest::Synchronize {
-                    dataset: Box::new(self.state.dataset.clone()),
-                    baseline: self.cloud.state.last_sync.clone().map(Box::new),
-                    preference,
-                },
+                self.cloud
+                    .state
+                    .dataset_request(&self.state.dataset, preference),
+                true,
                 ui.ctx(),
             ),
             None => {}
@@ -306,16 +342,26 @@ impl Tracker {
         );
     }
 
-    fn request_cloud(&mut self, request: CloudRequest, ctx: &Context) {
+    fn request_cloud(&mut self, request: CloudRequest, manual: bool, ctx: &Context) {
         if self.pending.is_some() || self.io.is_some() || self.cloud.pending.is_some() {
             return;
         }
-        self.cloud.error = None;
-        self.cloud.status = None;
-        let sync = matches!(request, CloudRequest::Synchronize { .. });
+        if manual {
+            self.cloud.error = None;
+            self.cloud.status = None;
+        }
+        let kind = match &request {
+            CloudRequest::Synchronize { dataset, .. } => PendingKind::Dataset {
+                submitted: dataset.clone(),
+                manual,
+            },
+            CloudRequest::SyncTimer { .. } => PendingKind::Timer,
+            CloudRequest::PollRealtime => PendingKind::Realtime,
+            _ => PendingKind::Account,
+        };
         let (send, result) = mpsc::channel();
         let ctx = ctx.clone();
-        self.cloud.pending = Some(Pending { result, sync });
+        self.cloud.pending = Some(Pending { result, kind });
         self.platform.cloud(
             request,
             Box::new(move |result| {
@@ -326,7 +372,24 @@ impl Tracker {
     }
 
     pub(crate) fn poll_cloud(&mut self, now: DateTime<Utc>, ctx: &Context) {
+        if self.pending.is_some() {
+            return;
+        }
         let Some(pending) = self.cloud.pending.take() else {
+            if let Some(account) = &self.cloud.account
+                && self.io.is_none()
+            {
+                if let Some(request) = self.cloud.schedule.next(
+                    &self.cloud.state,
+                    &self.state.dataset,
+                    account,
+                    self.cloud.conflict.is_some(),
+                    now.timestamp(),
+                ) {
+                    self.request_cloud(request, false, ctx);
+                }
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
             return;
         };
         match pending.result.try_recv() {
@@ -342,6 +405,7 @@ impl Tracker {
             Ok(Ok(CloudResponse::SignedIn(account))) => {
                 self.cloud.clear_login();
                 self.cloud.account = Some(account);
+                ctx.request_repaint();
             }
             Ok(Ok(CloudResponse::Conflict(count))) => self.cloud.conflict = Some(count),
             Ok(Ok(CloudResponse::SignedOut)) => {
@@ -353,28 +417,53 @@ impl Tracker {
                 self.cloud.error = Some("Сессия Supabase недоступна. Войдите снова.".into());
             }
             Ok(Ok(CloudResponse::Synchronized(point))) => {
+                let PendingKind::Dataset { submitted, manual } = pending.kind else {
+                    return;
+                };
                 self.cloud.conflict = None;
+                self.cloud.error = None;
                 let mut next = self.state.clone();
-                match next.execute(
-                    Command::ApplySyncedDataset(Box::new(point.dataset.clone())),
-                    now,
-                ) {
+                let mut cloud = self.cloud.state.clone();
+                match cloud.apply_dataset(&mut next, &submitted, *point, now) {
                     Ok(()) => {
-                        let cloud = CloudState {
-                            setup: self.cloud.state.setup.clone(),
-                            last_sync: Some(*point),
-                        };
-                        self.persist(
-                            next,
-                            Some(cloud),
-                            ctx,
-                            false,
-                            Some("Синхронизация завершена."),
-                        );
+                        if manual {
+                            self.cloud.status = Some("Синхронизация завершена.");
+                        }
+                        if next != self.state || cloud != self.cloud.state {
+                            self.persist(next, Some(cloud), ctx, false, None);
+                        }
                     }
                     Err(error) => self.cloud.error = Some(error.to_string()),
                 }
             }
+            Ok(Ok(CloudResponse::TimerSynchronized {
+                account,
+                snapshot,
+                submitted,
+            })) => {
+                let mut cloud = self.cloud.state.clone();
+                let mut next = self.state.clone();
+                cloud.timer.apply(&mut next, account, snapshot, submitted);
+                if cloud.timer.has_conflict() {
+                    self.cloud.error = Some("Общий таймер изменился на другом устройстве. Локальные действия сохранены.".into());
+                }
+                if next.timer != self.state.timer || submitted.is_some() {
+                    self.cloud.schedule.refresh();
+                } else if cloud.timer.is_pending() && !cloud.timer.has_conflict() {
+                    self.cloud.schedule.timer_changed();
+                }
+                if next != self.state || cloud != self.cloud.state {
+                    self.persist(next, Some(cloud), ctx, false, None);
+                }
+            }
+            Ok(Ok(CloudResponse::RealtimeChanged(changed))) => {
+                if changed {
+                    self.cloud.schedule.refresh();
+                }
+            }
+        }
+        if self.cloud.account.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
     }
 }

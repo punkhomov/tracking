@@ -8,6 +8,9 @@ use chrono::{DateTime, Utc};
 use tracking_core::{Command, Kind, TrackerState};
 use tracking_data::{Database, LocalState};
 
+mod cloud;
+mod features;
+
 uniffi::setup_scaffolding!();
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -32,6 +35,15 @@ impl From<Kind> for SessionKind {
     }
 }
 
+impl From<SessionKind> for Kind {
+    fn from(kind: SessionKind) -> Self {
+        match kind {
+            SessionKind::Work => Self::Work,
+            SessionKind::Break => Self::Break,
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Debug, uniffi::Enum)]
 pub enum TimerStatus {
     Ready,
@@ -47,6 +59,7 @@ pub struct TimerView {
     pub elapsed_seconds: i64,
     pub target_seconds: i64,
     pub note: String,
+    pub category_id: Option<String>,
 }
 
 #[derive(uniffi::Record)]
@@ -54,13 +67,16 @@ pub struct SessionView {
     pub id: String,
     pub kind: SessionKind,
     pub start_millis: i64,
+    pub end_millis: i64,
     pub duration_millis: i64,
     pub note: String,
+    pub category_id: Option<String>,
 }
 
 #[derive(uniffi::Object)]
 pub struct Tracker {
     local: Mutex<Store>,
+    cloud: Mutex<cloud::Client>,
 }
 
 #[uniffi::export]
@@ -69,7 +85,13 @@ impl Tracker {
     pub fn open(path: String) -> Result<Self, TrackerError> {
         let (database, state) = Database::open(Path::new(&path))?;
         Ok(Self {
-            local: Mutex::new(Store { database, state }),
+            local: Mutex::new(Store {
+                database,
+                state,
+                timer_changed: false,
+                dataset_changed: false,
+            }),
+            cloud: Mutex::new(cloud::Client::new()?),
         })
     }
 
@@ -87,25 +109,23 @@ impl Tracker {
                 id: id.to_string(),
                 kind: period.kind.into(),
                 start_millis: period.start.timestamp_millis(),
+                end_millis: period.end.timestamp_millis(),
                 duration_millis: period.duration_millis(),
                 note: period.note.clone(),
+                category_id: period.category.map(|id| id.to_string()),
             })
             .collect())
     }
 
     pub fn select_kind(&self, kind: SessionKind) -> Result<(), TrackerError> {
-        let kind = match kind {
-            SessionKind::Work => Kind::Work,
-            SessionKind::Break => Kind::Break,
-        };
-        self.change(Command::SelectKind(kind), None)
+        self.change(Command::SelectKind(kind.into()), None)
     }
 
-    pub fn start(&self, note: String) -> Result<(), TrackerError> {
+    pub fn start(&self, details: features::SessionDetails) -> Result<(), TrackerError> {
         self.change(
             Command::StartTimer {
-                note,
-                category: None,
+                note: details.note,
+                category: features::optional_id(details.category_id)?,
             },
             None,
         )
@@ -115,12 +135,23 @@ impl Tracker {
         self.change(Command::PauseTimer, None)
     }
 
-    pub fn resume(&self, edited_note: Option<String>) -> Result<(), TrackerError> {
-        self.change(Command::ResumeTimer, edited_note)
+    pub fn resume(&self, details: Option<features::SessionDetails>) -> Result<(), TrackerError> {
+        self.change(Command::ResumeTimer, details.map(session_edit).transpose()?)
     }
 
-    pub fn finish(&self, edited_note: Option<String>) -> Result<(), TrackerError> {
-        self.change(Command::FinishSession, edited_note)
+    pub fn finish(&self, details: Option<features::SessionDetails>) -> Result<(), TrackerError> {
+        self.change(
+            Command::FinishSession,
+            details.map(session_edit).transpose()?,
+        )
+    }
+
+    pub fn reset(&self) -> Result<(), TrackerError> {
+        self.change(Command::ResetTimer, None)
+    }
+
+    pub fn reopen(&self, id: String) -> Result<(), TrackerError> {
+        self.change(Command::ReopenSession(features::parse_id(&id)?), None)
     }
 }
 
@@ -131,15 +162,24 @@ impl Tracker {
             .map_err(|_| anyhow::anyhow!("Перезапустите Tracking для восстановления таймера."))
     }
 
-    fn change(&self, command: Command, edited_note: Option<String>) -> Result<(), TrackerError> {
-        self.lock()?.apply(command, edited_note, Utc::now())?;
+    fn change(&self, command: Command, edit: Option<Command>) -> Result<(), TrackerError> {
+        self.lock()?.apply(command, edit, Utc::now())?;
         Ok(())
     }
+}
+
+fn session_edit(details: features::SessionDetails) -> Result<Command> {
+    Ok(Command::EditTimer {
+        note: details.note,
+        category: features::optional_id(details.category_id)?,
+    })
 }
 
 struct Store {
     database: Database,
     state: LocalState,
+    timer_changed: bool,
+    dataset_changed: bool,
 }
 
 impl Store {
@@ -157,30 +197,42 @@ impl Store {
             elapsed_seconds: timer.map_or(0, |timer| timer.elapsed_seconds(now)),
             target_seconds: self.state.dataset.settings.target_seconds(kind),
             note: timer.map_or_else(String::new, |timer| timer.note.clone()),
+            category_id: timer
+                .and_then(|timer| timer.category)
+                .map(|id| id.to_string()),
         }
     }
 
-    fn apply(
-        &mut self,
-        command: Command,
-        edited_note: Option<String>,
-        now: DateTime<Utc>,
-    ) -> Result<()> {
-        let mut next = TrackerState {
+    fn apply(&mut self, command: Command, edit: Option<Command>, now: DateTime<Utc>) -> Result<()> {
+        let previous = self.tracker_state();
+        let mut next = previous.clone();
+        if let Some(edit) = edit {
+            next.execute(edit, now)?;
+        }
+        next.execute(command, now)?;
+        let mut cloud = self.state.cloud.clone();
+        let timer_changed = cloud.record_timer(&previous, &next);
+        let dataset_changed = previous.dataset != next.dataset;
+        self.save(next, cloud)?;
+        self.timer_changed |= timer_changed;
+        self.dataset_changed |= dataset_changed;
+        Ok(())
+    }
+
+    fn tracker_state(&self) -> TrackerState {
+        TrackerState {
             dataset: self.state.dataset.clone(),
             timer: self.state.timer.clone(),
             next_kind: self.state.next_kind,
-        };
-        if let Some(note) = edited_note {
-            let category = next.timer.as_ref().and_then(|timer| timer.category);
-            next.execute(Command::EditTimer { note, category }, now)?;
         }
-        next.execute(command, now)?;
+    }
+
+    fn save(&mut self, state: TrackerState, cloud: app_platform::cloud::CloudState) -> Result<()> {
         let next = LocalState {
-            dataset: next.dataset,
-            timer: next.timer,
-            next_kind: next.next_kind,
-            cloud: self.state.cloud.clone(),
+            dataset: state.dataset,
+            timer: state.timer,
+            next_kind: state.next_kind,
+            cloud,
         };
         self.database.save(&next)?;
         self.state = next;
@@ -221,7 +273,10 @@ mod tests {
         tracker.lock()?.apply(Command::PauseTimer, None, pause)?;
         tracker.lock()?.apply(
             Command::FinishSession,
-            Some("Итоговая заметка".into()),
+            Some(Command::EditTimer {
+                note: "Итоговая заметка".into(),
+                category: None,
+            }),
             pause + TimeDelta::seconds(60),
         )?;
         drop(tracker);
@@ -243,8 +298,18 @@ mod tests {
         let path = path.to_string_lossy();
         let first = Tracker::open(path.to_string())?;
         let second = Tracker::open(path.to_string())?;
-        first.start("Сохранена".into())?;
-        assert!(second.start("Не сохранена".into()).is_err());
+        first.start(features::SessionDetails {
+            note: "Сохранена".into(),
+            category_id: None,
+        })?;
+        assert!(
+            second
+                .start(features::SessionDetails {
+                    note: "Не сохранена".into(),
+                    category_id: None
+                })
+                .is_err()
+        );
         assert_eq!(second.timer()?.status, TimerStatus::Ready);
         assert_eq!(first.timer()?.note, "Сохранена");
         Ok(())

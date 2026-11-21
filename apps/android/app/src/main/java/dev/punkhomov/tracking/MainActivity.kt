@@ -10,28 +10,25 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -54,12 +51,12 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import dev.punkhomov.tracking.nativecore.CategoryView
+import dev.punkhomov.tracking.nativecore.SessionDetails
 import dev.punkhomov.tracking.nativecore.SessionKind
-import dev.punkhomov.tracking.nativecore.SessionView
+import dev.punkhomov.tracking.nativecore.SyncView
 import dev.punkhomov.tracking.nativecore.TimerStatus
 import dev.punkhomov.tracking.nativecore.TimerView
-import java.text.DateFormat
-import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -72,15 +69,28 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                while (true) {
-                    model.refreshTimer()
-                    delay(1_000)
+                launch {
+                    while (true) {
+                        model.refreshTimer()
+                        delay(1_000)
+                    }
+                }
+                launch {
+                    while (true) {
+                        model.refreshSync()
+                        delay(1_000)
+                    }
                 }
             }
         }
         setContent {
             val state by model.ui.collectAsStateWithLifecycle()
-            MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColors else lightColors) {
+            val dark = when (state.settings?.theme) {
+                "light" -> false
+                "dark" -> true
+                else -> isSystemInDarkTheme()
+            }
+            MaterialTheme(colorScheme = if (dark) darkColors else lightColors) {
                 TrackingScreen(state, model)
             }
         }
@@ -102,10 +112,17 @@ private val darkColors = darkColorScheme(
     surfaceContainerHigh = Color(0xFF202E29),
 )
 
+private enum class Screen(val label: String) {
+    Timer("Таймер"), History("История"), Timeline("Таймлайн"), Statistics("Статистика"),
+    Categories("Категории"), Zones("Зоны"), Settings("Настройки"),
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TrackingScreen(state: TrackingState, model: TrackerViewModel) {
-    var historyOpen by rememberSaveable { mutableStateOf(false) }
-    BackHandler(enabled = historyOpen) { historyOpen = false }
+    var screen by rememberSaveable { mutableStateOf(Screen.Timer) }
+    val cloud by model.cloud.collectAsStateWithLifecycle()
+    BackHandler(enabled = screen != Screen.Timer) { screen = Screen.Timer }
 
     Scaffold { insets ->
         Column(Modifier.fillMaxSize().padding(insets).imePadding()) {
@@ -129,18 +146,27 @@ private fun TrackingScreen(state: TrackingState, model: TrackerViewModel) {
                     }
                 }
             } else {
-                var note by rememberSaveable(timer.sessionId) { mutableStateOf(timer.note) }
-                TabRow(selectedTabIndex = if (historyOpen) 1 else 0) {
-                    Tab(!historyOpen, onClick = { historyOpen = false }, text = { Text("Таймер") })
-                    Tab(historyOpen, onClick = { historyOpen = true }, text = { Text("История") })
+                var note by rememberSaveable(timer.sessionId, timer.note) { mutableStateOf(timer.note) }
+                var category by rememberSaveable(timer.sessionId, timer.categoryId) { mutableStateOf(timer.categoryId) }
+                PrimaryScrollableTabRow(selectedTabIndex = screen.ordinal, edgePadding = 8.dp) {
+                    Screen.entries.forEach { item ->
+                        Tab(screen == item, onClick = { screen = item }, text = { Text(item.label) })
+                    }
                 }
                 if (state.error != null) {
                     ErrorText(state.error, Modifier.padding(20.dp))
                 }
-                if (historyOpen) {
-                    HistoryScreen(state.history)
-                } else {
-                    TimerScreen(timer, note, { note = it }, state.busy, model)
+                when (screen) {
+                    Screen.Timer -> TimerScreen(
+                        timer, note, { note = it }, category, { category = it },
+                        state.categories, cloud.status, state.busy, model,
+                    )
+                    Screen.History -> HistoryScreen(state, model)
+                    Screen.Timeline -> TimelineScreen(state, model)
+                    Screen.Statistics -> StatisticsScreen(state, model)
+                    Screen.Categories -> CategoriesScreen(state, model)
+                    Screen.Zones -> ZonesScreen(state, model)
+                    Screen.Settings -> SettingsScreen(state, cloud, model)
                 }
             }
         }
@@ -148,7 +174,7 @@ private fun TrackingScreen(state: TrackingState, model: TrackerViewModel) {
 }
 
 @Composable
-private fun ErrorText(message: String, modifier: Modifier) {
+internal fun ErrorText(message: String, modifier: Modifier = Modifier) {
     Text(
         message,
         modifier.semantics { liveRegion = LiveRegionMode.Polite },
@@ -161,6 +187,10 @@ private fun TimerScreen(
     timer: TimerView,
     note: String,
     onNoteChange: (String) -> Unit,
+    category: String?,
+    onCategoryChange: (String?) -> Unit,
+    categories: List<CategoryView>,
+    cloud: SyncView?,
     busy: Boolean,
     model: TrackerViewModel,
 ) {
@@ -168,7 +198,16 @@ private fun TimerScreen(
     val ready = timer.status == TimerStatus.READY
     val paused = timer.status == TimerStatus.PAUSED
     val editable = timer.kind == SessionKind.WORK && (ready || paused)
-    val editedNote = note.takeIf { paused && editable && it != timer.note }
+    val edited = SessionDetails(note, category).takeIf {
+        paused && editable && (it.note != timer.note || it.categoryId != timer.categoryId)
+    }
+    var confirmReset by rememberSaveable { mutableStateOf(false) }
+    if (confirmReset) {
+        ConfirmAction("Сбросить таймер?", "Сбросить", onDismiss = { confirmReset = false }) {
+            confirmReset = false
+            model.reset()
+        }
+    }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
@@ -215,7 +254,15 @@ private fun TimerScreen(
                 Text("Цель ${timer.targetSeconds / 60} мин", style = MaterialTheme.typography.bodyMedium)
             }
         }
+        if (cloud?.timerConflict == true) {
+            ErrorText("Общий таймер изменился на другом устройстве. Локальные действия сохранены.")
+        } else if (cloud?.timerPending == true) {
+            Text("Таймер ожидает синхронизации", style = MaterialTheme.typography.bodySmall)
+        }
         if (editable) {
+            if (categories.isNotEmpty()) {
+                CategoryPicker(categories, category, onCategoryChange)
+            }
             OutlinedTextField(
                 value = note,
                 onValueChange = onNoteChange,
@@ -225,26 +272,32 @@ private fun TimerScreen(
                 minLines = 2,
                 maxLines = 4,
             )
-        } else if (timer.note.isNotEmpty()) {
-            Text(timer.note, style = MaterialTheme.typography.bodyLarge)
+        } else {
+            categories.firstOrNull { it.id == timer.categoryId }?.let { Text(it.name) }
+            if (timer.note.isNotEmpty()) {
+                Text(timer.note, style = MaterialTheme.typography.bodyLarge)
+            }
         }
 
         if (ready) {
             Button(
                 onClick = {
                     focus.clearFocus()
-                    model.start(note)
+                    model.start(SessionDetails(note, category))
                 },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !busy,
             ) {
                 Text(if (timer.kind == SessionKind.WORK) "Запустить" else "Начать перерыв")
             }
+            if (timer.kind == SessionKind.BREAK) {
+                OutlinedButton(onClick = model::reset, enabled = !busy) { Text("Пропустить") }
+            }
         } else {
             Button(
                 onClick = {
                     focus.clearFocus()
-                    model.finish(editedNote)
+                    model.finish(edited)
                 },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !busy,
@@ -254,43 +307,25 @@ private fun TimerScreen(
             OutlinedButton(
                 onClick = {
                     focus.clearFocus()
-                    if (paused) model.resume(editedNote) else model.pause()
+                    if (paused) model.resume(edited) else model.pause()
                 },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !busy,
             ) {
                 Text(if (paused) "Продолжить" else "Пауза")
             }
+            OutlinedButton(onClick = { confirmReset = true }, enabled = !busy) { Text("Сбросить") }
         }
     }
 }
 
-@Composable
-private fun HistoryScreen(sessions: List<SessionView>) {
-    if (sessions.isEmpty()) {
-        Text("Завершённых сессий пока нет.", Modifier.padding(20.dp))
-    } else {
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
-            items(sessions, key = { it.id }) { session ->
-                val date = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
-                    .format(Date(session.startMillis))
-                ListItem(
-                    headlineContent = { Text(session.note.ifBlank { session.kind.label }) },
-                    supportingContent = { Text("${session.kind.label} · $date") },
-                    trailingContent = { Text(clock(session.durationMillis / 1_000)) },
-                )
-            }
-        }
-    }
-}
-
-private val SessionKind.label: String
+internal val SessionKind.label: String
     get() = when (this) {
         SessionKind.WORK -> "Работа"
         SessionKind.BREAK -> "Перерыв"
     }
 
-private fun clock(seconds: Long): String =
+internal fun clock(seconds: Long): String =
     if (seconds >= 3_600) {
         String.format(Locale.ROOT, "%d:%02d:%02d", seconds / 3_600, seconds / 60 % 60, seconds % 60)
     } else {

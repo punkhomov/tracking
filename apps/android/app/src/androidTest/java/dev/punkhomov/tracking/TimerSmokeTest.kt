@@ -46,6 +46,18 @@ class TimerSmokeTest {
         compose.onNodeWithText(EDITED_NOTE).assertIsDisplayed()
     }
 
+    @Test
+    fun createAndArchiveCategory() {
+        awaitText("Категории")
+        compose.onNodeWithText("Категории").performScrollTo().performClick()
+        compose.onNodeWithText("Добавить категорию").performClick()
+        compose.onAllNodes(hasSetTextAction())[0].performTextInput("Тестовая категория")
+        compose.onNodeWithText("Сохранить").performClick()
+        awaitText("Тестовая категория")
+        compose.onNodeWithText("В архив").performScrollTo().performClick()
+        awaitText("В архиве")
+    }
+
     private fun awaitText(text: String) {
         compose.waitUntil(15_000) {
             compose.onAllNodes(hasText(text)).fetchSemanticsNodes().size == 1

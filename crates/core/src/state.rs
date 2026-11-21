@@ -162,16 +162,7 @@ impl TrackerState {
     }
 
     pub fn reminder(&self, now: DateTime<Utc>) -> Option<Reminder> {
-        let timer = self.timer.as_ref().filter(|timer| !timer.is_paused())?;
-        let settings = &self.dataset.settings;
-        let deadline = settings.target_seconds(timer.kind);
-        let over = timer.elapsed_seconds(now) - deadline;
-        (over >= 0).then(|| Reminder {
-            timer: timer.id,
-            kind: timer.kind,
-            deadline,
-            occurrence: over / (i64::from(settings.reminder_interval_minutes.max(1)) * 60),
-        })
+        self.timer.as_ref()?.reminder(now, &self.dataset.settings)
     }
 
     fn ensure_not_running(&self, id: Uuid) -> Result<()> {

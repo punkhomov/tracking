@@ -120,8 +120,7 @@ impl Tracker {
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                         ui.set_width(width);
                         self.header(ui);
-                        let busy =
-                            self.pending.is_some() || self.io.is_some() || self.cloud.syncing();
+                        let busy = self.pending.is_some() || self.io.is_some();
                         ui.add_enabled_ui(!busy, |ui| {
                             egui::ScrollArea::vertical()
                                 .id_salt(self.screen)
@@ -160,8 +159,10 @@ impl Tracker {
         }
         if self.pending.is_some() {
             ui.weak("Сохранение…");
-        } else if self.cloud.syncing() {
-            ui.weak("Синхронизация…");
+        } else if self.cloud.state.timer.has_conflict() {
+            ui.colored_label(ui.visuals().error_fg_color, "Конфликт общего таймера");
+        } else if self.cloud.state.timer.is_pending() {
+            ui.weak("Таймер ожидает синхронизации");
         } else if self.io.is_some() {
             ui.weak("Операция с файлом или разрешениями…");
         }
@@ -380,7 +381,7 @@ impl Tracker {
         ctx: &Context,
         close_editor: bool,
     ) {
-        if self.pending.is_some() || self.cloud.syncing() {
+        if self.pending.is_some() {
             return;
         }
         let mut next = self.state.clone();
@@ -403,7 +404,15 @@ impl Tracker {
             self.error = Some(error.to_string());
             return;
         }
-        self.persist(next, None, ctx, close_editor, message);
+        let mut cloud = self.cloud.state.clone();
+        let queued = cloud.record_timer(&self.state, &next);
+        if queued {
+            self.cloud.schedule.timer_changed();
+        }
+        if next.dataset != self.state.dataset {
+            self.cloud.schedule.dataset_changed(now.timestamp());
+        }
+        self.persist(next, queued.then_some(cloud), ctx, close_editor, message);
     }
 
     fn persist(
@@ -447,6 +456,13 @@ impl Tracker {
                 let next = pending.state.timer.as_ref().map(|timer| timer.id);
                 if prev != next {
                     self.last_reminder = None;
+                }
+                if prev != next
+                    || (self.note == self.state.timer.as_ref().map_or("", |timer| &timer.note)
+                        && self.category
+                            == self.state.timer.as_ref().and_then(|timer| timer.category)
+                        && self.state.timer != pending.state.timer)
+                {
                     self.note = pending
                         .state
                         .timer

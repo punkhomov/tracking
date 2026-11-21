@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Interval, Kind, Period, Settings};
+use crate::{Interval, Kind, Period, Reminder, Settings};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Timer {
@@ -76,6 +76,17 @@ impl Timer {
             .map(|pause| (pause.end - pause.start).num_milliseconds())
             .sum();
         ((end - self.start).num_milliseconds() - paused).max(0) / 1_000
+    }
+
+    pub fn reminder(&self, now: DateTime<Utc>, settings: &Settings) -> Option<Reminder> {
+        let deadline = settings.target_seconds(self.kind);
+        let over = self.elapsed_seconds(now) - deadline;
+        (!self.is_paused() && over >= 0).then(|| Reminder {
+            timer: self.id,
+            kind: self.kind,
+            deadline,
+            occurrence: over / (i64::from(settings.reminder_interval_minutes.max(1)) * 60),
+        })
     }
 
     pub fn preview(&self, now: DateTime<Utc>) -> Period {
