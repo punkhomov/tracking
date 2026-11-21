@@ -233,7 +233,7 @@ class TrackerViewModel(application: Application) : AndroidViewModel(application)
         manager.notify(
             1,
             Notification.Builder(tracking, channel.id)
-                .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                .setSmallIcon(R.drawable.tracking_foreground)
                 .setContentTitle(title)
                 .setAutoCancel(true)
                 .build(),

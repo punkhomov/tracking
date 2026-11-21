@@ -13,13 +13,15 @@ use eframe::egui;
 use tracking_core::TrackerState;
 use tracking_data::{Database, LocalState};
 
+#[cfg(target_os = "windows")]
+mod windows_notifications;
+
+const ICON_PNG: &[u8] = include_bytes!("../../../assets/tracking.png");
+
 fn main() -> Result<()> {
     let path = match std::env::var_os("TRACKING_DB") {
         Some(path) => PathBuf::from(path),
-        None => directories::ProjectDirs::from("dev", "punkhomov", "Tracking")
-            .context("Не найдена папка данных приложения.")?
-            .data_local_dir()
-            .join("tracking.sqlite3"),
+        None => data_directory()?.join("tracking.sqlite3"),
     };
     if let Some(directory) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
         std::fs::create_dir_all(directory)?;
@@ -35,10 +37,20 @@ fn main() -> Result<()> {
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([920.0, 740.0])
-                .with_min_inner_size([360.0, 420.0]),
+                .with_min_inner_size([360.0, 420.0])
+                .with_icon(eframe::icon_data::from_png_bytes(ICON_PNG)?),
             ..Default::default()
         },
         Box::new(move |cc| {
+            #[cfg(windows)]
+            {
+                let mut fonts = egui::FontDefinitions::default();
+                if let Some(ubuntu) = fonts.font_data.get_mut("Ubuntu-Light") {
+                    // Use the same antialiased bitmap at each horizontal position.
+                    std::sync::Arc::make_mut(ubuntu).tweak.subpixel_binning = Some(false);
+                }
+                cc.egui_ctx.set_fonts(fonts);
+            }
             let store = DesktopStore {
                 database,
                 context: cc.egui_ctx.clone(),
@@ -52,6 +64,15 @@ fn main() -> Result<()> {
         }),
     )
     .map_err(|error| anyhow!("{error}"))
+}
+
+fn data_directory() -> Result<PathBuf> {
+    Ok(
+        directories::ProjectDirs::from("dev", "punkhomov", "Tracking")
+            .context("Не найдена папка данных приложения.")?
+            .data_local_dir()
+            .to_owned(),
+    )
 }
 
 struct DesktopApp(Tracker);
@@ -172,6 +193,8 @@ fn cloud_worker() -> Result<mpsc::Sender<(CloudRequest, CloudComplete)>> {
 fn notify(title: &str, body: &str) -> Result<()> {
     let mut notification = notify_rust::Notification::new();
     notification.appname("Tracking").summary(title).body(body);
+    #[cfg(target_os = "windows")]
+    windows_notifications::set_identity(&mut notification)?;
     #[cfg(not(target_os = "windows"))]
     notification.sound_name(if cfg!(target_os = "macos") {
         "Glass"

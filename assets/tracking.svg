@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <title>Tracking</title>
+  <rect width="128" height="128" rx="28" fill="#1F5C4B"/>
+  <path d="M96 48a36 36 0 1 0 0 32" fill="none" stroke="#F3FBF7" stroke-width="9" stroke-linecap="round"/>
+  <path d="M64 43v22l15 9" fill="none" stroke="#8DD0B6" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="100" cy="64" r="4.5" fill="#8DD0B6"/>
+</svg>
