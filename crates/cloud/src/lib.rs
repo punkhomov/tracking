@@ -98,7 +98,7 @@ impl Service {
                 self.sign_in(client, session)
             }
             Err(error) if error.is::<AuthRequired>() => {
-                self.sign_out()?;
+                drop(self.remove_local_session()?);
                 Ok(CloudResponse::SessionExpired)
             }
             Err(error) => Err(error),
@@ -117,13 +117,12 @@ impl Service {
         CloudResponse::SignedIn(account)
     }
 
-    fn sign_out(&mut self) -> Result<()> {
+    fn remove_local_session(&mut self) -> Result<Option<(Supabase, Session)>> {
         if let Some(storage) = &self.storage {
             storage.clear()?;
         }
-        self.signed_in = None;
         self.realtime = Default::default();
-        Ok(())
+        Ok(self.signed_in.take())
     }
 
     pub async fn execute(&mut self, request: CloudRequest) -> Result<CloudResponse> {
@@ -156,13 +155,11 @@ impl Service {
                     .filter(|point| point.account == account)
                     .map(|point| &point.dataset);
                 match client
-                    .synchronize(
-                        session,
-                        &dataset,
-                        baseline,
-                        preference,
-                        self.storage.as_deref(),
-                    )
+                    .with_auth(session, self.storage.as_deref(), async |session| {
+                        client
+                            .synchronize(session, &dataset, baseline, preference)
+                            .await
+                    })
                     .await
                 {
                     Ok(dataset) => Ok(CloudResponse::Synchronized(Box::new(SyncPoint {
@@ -170,7 +167,7 @@ impl Service {
                         dataset,
                     }))),
                     Err(error) if error.is::<AuthRequired>() => {
-                        self.sign_out()?;
+                        drop(self.remove_local_session()?);
                         Ok(CloudResponse::SessionExpired)
                     }
                     Err(error) => match error.downcast_ref::<Conflict>() {
@@ -188,7 +185,9 @@ impl Service {
                 }
                 let submitted = update.as_ref().map(|update| update.change.id);
                 match client
-                    .sync_timer(session, update, self.storage.as_deref())
+                    .with_auth(session, self.storage.as_deref(), async |session| {
+                        client.sync_timer(session, update.as_ref()).await
+                    })
                     .await
                 {
                     Ok(snapshot) => Ok(CloudResponse::TimerSynchronized {
@@ -197,7 +196,7 @@ impl Service {
                         submitted,
                     }),
                     Err(error) if error.is::<AuthRequired>() => {
-                        self.sign_out()?;
+                        drop(self.remove_local_session()?);
                         Ok(CloudResponse::SessionExpired)
                     }
                     Err(error) => Err(error),
@@ -210,7 +209,10 @@ impl Service {
                 Ok(CloudResponse::RealtimeChanged(changed))
             }
             CloudRequest::SignOut => {
-                self.sign_out()?;
+                if let Some((client, mut session)) = self.remove_local_session()? {
+                    // Revocation is best effort so signing out also works offline.
+                    let _ = client.revoke_current_session(&mut session).await;
+                }
                 Ok(CloudResponse::SignedOut)
             }
         }
@@ -317,14 +319,30 @@ impl Supabase {
         .await?)
     }
 
+    async fn with_auth<T>(
+        &self,
+        session: &mut Session,
+        storage: Option<&dyn SessionStorage>,
+        operation: impl AsyncFn(&Session) -> Result<T>,
+    ) -> Result<T> {
+        if !token_is_fresh(session.expires_at) {
+            self.refresh(session, storage).await?;
+            return operation(session).await;
+        }
+        match operation(session).await {
+            Err(error) if error.is::<AccessTokenRejected>() => {
+                self.refresh(session, storage).await?;
+                operation(session).await
+            }
+            result => result,
+        }
+    }
+
     async fn refresh(
         &self,
         session: &mut Session,
         storage: Option<&dyn SessionStorage>,
     ) -> Result<()> {
-        if token_is_fresh(session.expires_at) {
-            return Ok(());
-        }
         let next = self.exchange_refresh_token(&session.refresh_token).await?;
         ensure!(
             next.user.id == session.user.id,
@@ -365,31 +383,47 @@ impl Supabase {
         }
         let status = response.status();
         let body: serde_json::Value = response.json().await.unwrap_or_default();
-        if matches!(
-            body["error_code"].as_str(),
-            Some(
-                "refresh_token_not_found"
-                    | "refresh_token_already_used"
-                    | "session_not_found"
-                    | "session_expired"
-                    | "user_not_found"
-                    | "user_banned"
+        if status.is_client_error()
+            && matches!(
+                body["error_code"].as_str(),
+                Some(
+                    "refresh_token_not_found"
+                        | "refresh_token_already_used"
+                        | "session_not_found"
+                        | "session_expired"
+                        | "user_not_found"
+                        | "user_banned"
+                )
             )
-        ) {
+        {
             return Err(AuthRequired.into());
         }
         bail!("Не удалось обновить сессию Supabase (HTTP {status}).")
     }
 
+    async fn revoke_current_session(&self, session: &mut Session) -> Result<()> {
+        self.with_auth(session, None, async |session| {
+            checked(
+                self.request(reqwest::Method::POST, "auth/v1/logout")
+                    .query(&[("scope", "local")])
+                    .timeout(Duration::from_secs(5))
+                    .bearer_auth(&session.access_token)
+                    .send()
+                    .await,
+            )
+            .await?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn synchronize(
         &self,
-        session: &mut Session,
+        session: &Session,
         local: &Dataset,
         baseline: Option<&Dataset>,
         preference: Preference,
-        storage: Option<&dyn SessionStorage>,
     ) -> Result<Dataset> {
-        self.refresh(session, storage).await?;
         let empty = Dataset::default();
         let base = baseline.unwrap_or(&empty);
         for _ in 0..3 {
@@ -413,12 +447,10 @@ impl Supabase {
 
     async fn sync_timer(
         &self,
-        session: &mut Session,
-        update: Option<TimerUpdate>,
-        storage: Option<&dyn SessionStorage>,
+        session: &Session,
+        update: Option<&TimerUpdate>,
     ) -> Result<TimerSnapshot> {
-        self.refresh(session, storage).await?;
-        let request = if let Some(update) = &update {
+        let request = if let Some(update) = update {
             let change = &update.change;
             self.request(reqwest::Method::POST, "rest/v1/rpc/tracking_apply_timer")
                 .json(&json!({
@@ -519,19 +551,27 @@ struct AuthRequired;
 
 impl fmt::Display for AuthRequired {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(
-            "Supabase отклонил ключ или сессию. Проверьте данные подключения и войдите снова.",
-        )
+        f.write_str("Сессия Supabase завершена. Войдите снова.")
     }
 }
 
 impl std::error::Error for AuthRequired {}
 
+#[derive(Debug)]
+struct AccessTokenRejected;
+
+impl fmt::Display for AccessTokenRejected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Supabase отклонил токен доступа.")
+    }
+}
+
+impl std::error::Error for AccessTokenRejected {}
+
 async fn checked(response: reqwest::Result<Response>) -> Result<Response> {
     let response = response.context("Не удалось связаться с Supabase.")?;
     match response.status() {
         status if status.is_success() => Ok(response),
-        StatusCode::UNAUTHORIZED => Err(AuthRequired.into()),
         StatusCode::TOO_MANY_REQUESTS => {
             bail!("Supabase ограничил частоту запросов. Повторите позже.")
         }
@@ -539,16 +579,11 @@ async fn checked(response: reqwest::Result<Response>) -> Result<Response> {
             // Read the response so setup and authorization errors include the server's explanation.
             let body = response.text().await.unwrap_or_default();
             let json = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
-            if matches!(
-                json["error_code"].as_str(),
-                Some(
-                    "refresh_token_not_found"
-                        | "refresh_token_already_used"
-                        | "session_not_found"
-                        | "session_expired"
-                )
-            ) {
-                return Err(AuthRequired.into());
+            if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+                && (matches!(json["code"].as_str(), Some("PGRST301" | "PGRST303"))
+                    || json["error_code"].as_str() == Some("bad_jwt"))
+            {
+                return Err(AccessTokenRejected.into());
             }
             let detail = ["message", "msg", "error_description"]
                 .into_iter()

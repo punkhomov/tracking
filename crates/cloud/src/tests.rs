@@ -36,6 +36,55 @@ impl SessionStorage for TestStorage {
     }
 }
 
+type MockStep = (&'static str, &'static str, &'static str, serde_json::Value);
+
+fn serve<const N: usize>(
+    listener: TcpListener,
+    steps: [MockStep; N],
+) -> std::thread::JoinHandle<Result<()>> {
+    std::thread::spawn(move || -> Result<()> {
+        for (route, expected, status, body) in steps {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut input = BufReader::new(&stream);
+            let mut line = String::new();
+            input.read_line(&mut line)?;
+            assert!(line.starts_with(route), "Unexpected request: {line}");
+            let mut length = 0;
+            let mut authorization = String::new();
+            loop {
+                line.clear();
+                ensure!(input.read_line(&mut line)? != 0, "Incomplete request");
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("authorization")
+                {
+                    authorization = value.trim().into();
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse()?;
+                }
+            }
+            let mut request_body = vec![0; length];
+            input.read_exact(&mut request_body)?;
+            if expected.starts_with("Bearer ") {
+                assert_eq!(authorization, expected);
+            } else {
+                assert!(std::str::from_utf8(&request_body)?.contains(expected));
+            }
+            let body = body.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+        }
+        Ok(())
+    })
+}
+
 #[test]
 fn restores_the_valid_access_token_without_network() -> Result<()> {
     let connection = Connection::new("http://127.0.0.1:1", "sb_publishable_test")?;
@@ -83,6 +132,8 @@ fn remembers_and_rotates_the_session_across_restarts() -> Result<()> {
             "user": {"id": account.user},
         })
     };
+    let mut signed_in_again = session("second-login");
+    signed_in_again["expires_at"] = json!(Utc::now().timestamp() + 3600);
     let steps = [
         (
             "POST /auth/v1/verify ",
@@ -120,44 +171,15 @@ fn remembers_and_rotates_the_session_across_restarts() -> Result<()> {
             "400 Bad Request",
             json!({"error_code": "refresh_token_not_found"}),
         ),
+        ("POST /auth/v1/verify ", "123456", "200 OK", signed_in_again),
         (
-            "POST /auth/v1/verify ",
-            "123456",
-            "200 OK",
-            session("second-login"),
+            "POST /auth/v1/logout?scope=local ",
+            "Bearer synthetic-access",
+            "503 Unavailable",
+            json!({}),
         ),
     ];
-    let server = std::thread::spawn(move || -> Result<()> {
-        for (route, expected, status, body) in steps {
-            let (mut stream, _) = listener.accept()?;
-            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-            let mut input = BufReader::new(&stream);
-            let mut line = String::new();
-            input.read_line(&mut line)?;
-            assert!(line.starts_with(route), "Unexpected request: {line}");
-            let mut length = 0;
-            loop {
-                line.clear();
-                ensure!(input.read_line(&mut line)? != 0, "Incomplete request");
-                if line == "\r\n" {
-                    break;
-                }
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = value.trim().parse()?;
-                }
-            }
-            let mut request_body = vec![0; length];
-            input.read_exact(&mut request_body)?;
-            assert!(std::str::from_utf8(&request_body)?.contains(expected));
-            let body = body.to_string();
-            write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )?;
-        }
-        Ok(())
-    });
+    let server = serve(listener, steps);
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -200,6 +222,115 @@ fn remembers_and_rotates_the_session_across_restarts() -> Result<()> {
 }
 
 #[test]
+fn rejected_access_token_refreshes_once_and_only_auth_can_end_the_session() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let connection = Connection::new(
+        &format!("http://{}", listener.local_addr()?),
+        "sb_publishable_test",
+    )?;
+    let account = Account {
+        project: connection.url().into(),
+        user: Uuid::new_v4(),
+    };
+    let expires = Utc::now().timestamp() + 3600;
+    let session = |access, refresh| {
+        json!({
+            "access_token": access,
+            "refresh_token": refresh,
+            "expires_at": expires,
+            "user": {"id": account.user},
+        })
+    };
+    let get = "GET /rest/v1/tracking_timer?";
+    let refresh = "POST /auth/v1/token?grant_type=refresh_token ";
+    let rejected = json!({"code":"PGRST301","message":"JWT expired"});
+    let server = serve(
+        listener,
+        [
+            (
+                get,
+                "Bearer old-access",
+                "401 Unauthorized",
+                rejected.clone(),
+            ),
+            (
+                refresh,
+                "old-refresh",
+                "200 OK",
+                session("new-access", "new-refresh"),
+            ),
+            (get, "Bearer new-access", "200 OK", json!([])),
+            (
+                get,
+                "Bearer new-access",
+                "401 Unauthorized",
+                json!({"message":"Invalid API key"}),
+            ),
+            (
+                get,
+                "Bearer new-access",
+                "401 Unauthorized",
+                rejected.clone(),
+            ),
+            (
+                refresh,
+                "new-refresh",
+                "200 OK",
+                session("last-access", "last-refresh"),
+            ),
+            (
+                get,
+                "Bearer last-access",
+                "401 Unauthorized",
+                rejected.clone(),
+            ),
+            (
+                get,
+                "Bearer last-access",
+                "401 Unauthorized",
+                rejected.clone(),
+            ),
+            (refresh, "last-refresh", "503 Unavailable", json!({})),
+            (get, "Bearer last-access", "401 Unauthorized", rejected),
+            (
+                refresh,
+                "last-refresh",
+                "400 Bad Request",
+                json!({"error_code":"refresh_token_not_found"}),
+            ),
+        ],
+    );
+    let store = TestStorage::default();
+    store.save(&SavedSession {
+        account: account.clone(),
+        refresh_token: "old-refresh".into(),
+        access: Some(SavedAccess {
+            token: "old-access".into(),
+            expires_at: expires,
+        }),
+    })?;
+    tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+        let mut service = Service::with_session_storage(store.clone());
+        let sync = || CloudRequest::SyncTimer { account: account.clone(), update: None };
+        assert!(matches!(service.execute(CloudRequest::RestoreSession(connection)).await?, CloudResponse::SignedIn(_)));
+        assert!(matches!(service.execute(sync()).await?, CloudResponse::TimerSynchronized { .. }));
+        assert_eq!(store.load()?.unwrap().refresh_token, "new-refresh");
+
+        assert!(service.execute(sync()).await.is_err());
+        assert_eq!(store.load()?.unwrap().refresh_token, "new-refresh");
+        assert!(matches!(service.execute(sync()).await, Err(error) if error.is::<AccessTokenRejected>()));
+        assert_eq!(store.load()?.unwrap().refresh_token, "last-refresh");
+        assert!(service.execute(sync()).await.is_err());
+        assert_eq!(store.load()?.unwrap().refresh_token, "last-refresh");
+
+        assert!(matches!(service.execute(sync()).await?, CloudResponse::SessionExpired));
+        assert!(store.load()?.is_none());
+        Ok::<_, anyhow::Error>(())
+    })?;
+    server.join().expect("mock auth server panicked")
+}
+
+#[test]
 #[ignore = "requires local Supabase and a fresh synthetic account"]
 fn two_devices_receive_the_timer_and_reject_a_late_finish() -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
@@ -215,15 +346,15 @@ async fn two_devices() -> Result<()> {
     )?;
     let first = Supabase::new(&connection)?;
     let second = Supabase::new(&connection)?;
-    let mut desktop = sign_in(&first).await?;
-    let mut phone = sign_in(&second).await?;
+    let desktop = sign_in(&first).await?;
+    let phone = sign_in(&second).await?;
     let account = first.account(&desktop);
     let mut changes = realtime::Subscription::default();
     wait_for_change(&mut changes, &first, &desktop).await?;
 
     let mut desktop_timer = TimerSync::default();
     let mut desktop_state = TrackerState::default();
-    let empty = first.sync_timer(&mut desktop, None, None).await?;
+    let empty = first.sync_timer(&desktop, None).await?;
     assert_eq!(empty.revision, 0);
     desktop_timer.apply(&mut desktop_state, account.clone(), empty, None);
     let now = Utc::now();
@@ -238,13 +369,13 @@ async fn two_devices() -> Result<()> {
     assert!(desktop_timer.record(&desktop_state, &started));
     let start = update(&desktop_timer, &account);
     let start_id = start.change.id;
-    let running = first.sync_timer(&mut desktop, Some(start), None).await?;
+    let running = first.sync_timer(&desktop, Some(&start)).await?;
     assert_eq!(running.revision, 1);
     assert_eq!(running.change_id, Some(start_id));
     desktop_timer.apply(&mut started, account.clone(), running, Some(start_id));
     wait_for_change(&mut changes, &first, &desktop).await?;
 
-    let running = second.sync_timer(&mut phone, None, None).await?;
+    let running = second.sync_timer(&phone, None).await?;
     let session_id = running.timer.as_ref().unwrap().id;
     let mut phone_timer = TimerSync::default();
     let mut phone_state = TrackerState::default();
@@ -260,20 +391,20 @@ async fn two_devices() -> Result<()> {
     assert!(phone_timer.record(&phone_state, &online_finish));
     let accepted_id = update(&phone_timer, &account).change.id;
     let expected = second
-        .sync_timer(&mut phone, Some(update(&phone_timer, &account)), None)
+        .sync_timer(&phone, Some(&update(&phone_timer, &account)))
         .await?;
     assert_eq!(expected.revision, 2);
     assert_eq!(expected.change_id, Some(accepted_id));
     assert!(expected.timer.is_none());
     wait_for_change(&mut changes, &first, &desktop).await?;
     let replay = second
-        .sync_timer(&mut phone, Some(update(&phone_timer, &account)), None)
+        .sync_timer(&phone, Some(&update(&phone_timer, &account)))
         .await?;
     assert!(replay == expected);
 
     let stale = update(&desktop_timer, &account);
     let stale_id = stale.change.id;
-    let canonical = first.sync_timer(&mut desktop, Some(stale), None).await?;
+    let canonical = first.sync_timer(&desktop, Some(&stale)).await?;
     assert!(canonical == expected);
     desktop_timer.apply(
         &mut offline_finish,
