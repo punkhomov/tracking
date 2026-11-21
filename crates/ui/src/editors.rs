@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use egui::{Color32, ComboBox, Context, Frame, Id, Modal, ScrollArea, Ui};
 use tracking_core::{
     Category, Command, Dataset, ImportArchive, Kind, Period, Zone, ZoneStyle, read_archive,
@@ -52,6 +52,9 @@ pub(crate) struct ZoneForm {
     color: Color32,
     start: String,
     end: String,
+    starts_on: String,
+    ends_on: String,
+    excluded_dates: String,
     existing: bool,
 }
 
@@ -98,7 +101,12 @@ impl Editor {
         })
     }
 
-    pub fn new_zone(id: Option<Uuid>, parent: Option<Uuid>, dataset: &Dataset) -> Self {
+    pub fn new_zone(
+        id: Option<Uuid>,
+        parent: Option<Uuid>,
+        dataset: &Dataset,
+        today: NaiveDate,
+    ) -> Self {
         let original = id.and_then(|id| dataset.zones.get(&id).cloned());
         let root = parent.and_then(|parent| dataset.zones.get(&parent));
         let existing = original.is_some();
@@ -109,6 +117,9 @@ impl Editor {
             }),
             end: root.map_or(NaiveTime::from_hms_opt(19, 0, 0).unwrap(), |zone| zone.end),
             weekdays: root.map_or_else(|| vec![1, 2, 3, 4, 5], |zone| zone.weekdays.clone()),
+            starts_on: Some(today),
+            ends_on: None,
+            excluded_dates: Default::default(),
             parent,
             color: Some("#618abc".into()),
             style: ZoneStyle::Solid,
@@ -120,6 +131,18 @@ impl Editor {
             id: id.unwrap_or_else(Uuid::new_v4),
             start: value.start.format("%H:%M").to_string(),
             end: value.end.format("%H:%M").to_string(),
+            starts_on: value
+                .starts_on
+                .map_or_else(String::new, |date| date.to_string()),
+            ends_on: value
+                .ends_on
+                .map_or_else(String::new, |date| date.to_string()),
+            excluded_dates: value
+                .excluded_dates
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
             color: value
                 .color
                 .as_deref()
@@ -360,6 +383,23 @@ impl ZoneForm {
                 }
             }
         });
+        text_field(ui, "Действует с", &mut self.starts_on, "ГГГГ-ММ-ДД");
+        text_field(
+            ui,
+            "Действует по (включительно)",
+            &mut self.ends_on,
+            "ГГГГ-ММ-ДД",
+        );
+        ui.weak("Пустая дата оставляет границу открытой.");
+        let label = ui.label("Даты-исключения");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.excluded_dates)
+                .hint_text("ГГГГ-ММ-ДД")
+                .desired_rows(2)
+                .desired_width(ui.available_width()),
+        )
+        .labelled_by(label.id);
+        ui.weak("По одной дате в строке.");
         ui.label("Родительская зона");
         let parent = self.value.parent.and_then(|id| dataset.zones.get(&id));
         ComboBox::from_id_salt("zone-parent")
@@ -398,12 +438,36 @@ impl ZoneForm {
             .map_err(|_| "Время начала должно быть в формате ЧЧ:ММ.")?;
         zone.end = NaiveTime::parse_from_str(self.end.trim(), "%H:%M")
             .map_err(|_| "Время конца должно быть в формате ЧЧ:ММ.")?;
+        zone.starts_on = parse_optional_zone_date(&self.starts_on, "Дата начала действия")?;
+        zone.ends_on = parse_optional_zone_date(&self.ends_on, "Дата окончания действия")?;
+        zone.excluded_dates = self
+            .excluded_dates
+            .lines()
+            .enumerate()
+            .map(|(index, line)| (index + 1, line.trim()))
+            .filter(|&(_, line)| !line.is_empty())
+            .map(|(line_number, line)| {
+                NaiveDate::parse_from_str(line, "%Y-%m-%d").map_err(|_| {
+                    format!("Укажите дату исключения в строке {line_number} в формате ГГГГ-ММ-ДД.")
+                })
+            })
+            .collect::<Result<_, _>>()?;
         zone.color = Some(color_string(self.color));
         if zone.parent.is_none() && zone.style == ZoneStyle::Hatched {
             zone.style = ZoneStyle::Solid;
         }
         Ok(Command::SaveZone(self.id, zone))
     }
+}
+
+fn parse_optional_zone_date(text: &str, title: &str) -> Result<Option<NaiveDate>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .map(Some)
+        .map_err(|_| format!("{title} должна быть в формате ГГГГ-ММ-ДД."))
 }
 
 fn text_field(ui: &mut Ui, title: &str, value: &mut String, hint: &str) {

@@ -102,17 +102,16 @@ pub fn day_range<T: TimeZone>(date: NaiveDate, tz: &T) -> Moments {
 }
 
 pub fn zone_slices<T: TimeZone>(dataset: &Dataset, date: NaiveDate, tz: &T) -> Vec<ZoneSlice> {
-    let weekday = date.weekday().num_days_from_sunday() as u8;
     let mut result: Vec<_> = dataset
         .zones
         .iter()
         .filter_map(|(&id, zone)| {
-            if zone.exclude_from_breakdown || !zone.weekdays.contains(&weekday) {
+            if zone.exclude_from_breakdown || !zone.is_scheduled_on(date) {
                 return None;
             }
             if let Some(parent) = zone.parent {
                 let parent = dataset.zones.get(&parent)?;
-                if parent.exclude_from_breakdown || !parent.weekdays.contains(&weekday) {
+                if parent.exclude_from_breakdown || !parent.is_scheduled_on(date) {
                     return None;
                 }
             }

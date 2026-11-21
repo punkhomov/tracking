@@ -10,11 +10,12 @@ app-platform.workspace = true
 app-ui.workspace = true
 chrono.workspace = true
 eframe.workspace = true
+idb = "0.6.5"
 log = "0.4"
-rexie = "0.6.2"
 js-sys = "0.3"
 serde.workspace = true
 serde_json.workspace = true
+tracking-cloud.workspace = true
 tracking-core.workspace = true
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [

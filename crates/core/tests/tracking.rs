@@ -78,6 +78,9 @@ fn reads_legacy_links_and_clips_pauses_left_outside_an_edited_period() {
     assert_eq!(period.duration_millis(), 900_000);
     assert_eq!(zone.category, Some(category));
     assert_eq!(child.parent, Some(zone_id));
+    assert!(zone.starts_on.is_none());
+    assert!(zone.ends_on.is_none());
+    assert!(zone.excluded_dates.is_empty());
     assert!(zone.full_range);
     assert_eq!(dataset.settings.work_minutes, 30);
     assert_eq!(import_json(&dataset, archive).unwrap(), dataset);

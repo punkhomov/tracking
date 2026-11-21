@@ -1,8 +1,8 @@
-use chrono::{Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{Datelike, Days, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use tracking_core::{
     ArchiveScope, Category, Command, Dataset, Interval, Kind, Period, Settings, TrackerState, Zone,
     ZoneStyle, export_archive, read_archive,
-    reports::{Span, hourly_alignment, report, zone_breakdown},
+    reports::{Span, hourly_alignment, report, zone_breakdown, zone_slices},
 };
 use uuid::Uuid;
 
@@ -34,6 +34,9 @@ fn zone(category: Option<Uuid>) -> Zone {
         start: NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
         end: NaiveTime::from_hms_opt(11, 0, 0).unwrap(),
         weekdays: vec![date().weekday().num_days_from_sunday() as u8],
+        starts_on: None,
+        ends_on: None,
+        excluded_dates: Default::default(),
         parent: None,
         category,
         style: ZoneStyle::Solid,
@@ -75,7 +78,15 @@ fn scoped_archives_apply_only_the_selected_sections() {
     current.settings.work_minutes = 37;
     let mut source = Dataset::default();
     source.periods.insert(new_id, period(None));
-    source.zones.insert(Uuid::new_v4(), zone(None));
+    source.zones.insert(
+        Uuid::new_v4(),
+        Zone {
+            starts_on: Some(date() - Days::new(2)),
+            ends_on: Some(date() + Days::new(2)),
+            excluded_dates: [date()].into(),
+            ..zone(None)
+        },
+    );
 
     let history = export_archive(&source, ArchiveScope::Periods).unwrap();
     let append = read_archive(&history)
@@ -184,6 +195,125 @@ fn planned_time_and_alignment_account_for_pauses() {
     assert_eq!(
         hourly_alignment(&state.dataset, date(), &Utc)[10].matched_ms,
         30 * 60_000
+    );
+}
+
+#[test]
+fn zone_dates_keep_historical_plans_and_exclude_holidays_from_alignment() {
+    let holiday = date();
+    let first_day = holiday - Days::new(1);
+    let last_day = holiday + Days::new(1);
+    let new_job = holiday + Days::new(2);
+    let old_zone_id = Uuid::new_v4();
+    let child_id = Uuid::new_v4();
+    let new_zone_id = Uuid::new_v4();
+    let work = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let mut state = TrackerState::default();
+    let old_zone = Zone {
+        weekdays: vec![1, 2, 3, 4, 5],
+        starts_on: Some(first_day),
+        ends_on: Some(last_day),
+        excluded_dates: [holiday].into(),
+        ..zone(Some(work))
+    };
+    let child = Zone {
+        parent: Some(old_zone_id),
+        end: NaiveTime::from_hms_opt(10, 30, 0).unwrap(),
+        starts_on: None,
+        ends_on: None,
+        excluded_dates: [first_day].into(),
+        ..old_zone.clone()
+    };
+    let next_zone = Zone {
+        starts_on: Some(new_job),
+        ends_on: None,
+        excluded_dates: Default::default(),
+        ..old_zone.clone()
+    };
+    for (id, zone) in [
+        (old_zone_id, old_zone),
+        (child_id, child),
+        (new_zone_id, next_zone),
+    ] {
+        state
+            .execute(Command::SaveZone(id, zone), time(9, 0))
+            .unwrap();
+    }
+    for (date, category) in [(first_day, work), (holiday, other), (new_job, work)] {
+        let offset = date - holiday;
+        let session = Period {
+            start: time(10, 0) + offset,
+            end: time(11, 0) + offset,
+            pauses: Vec::new(),
+            ..period(Some(category))
+        };
+        state
+            .execute(
+                Command::SavePeriod(Uuid::new_v4(), session),
+                time(12, 0) + offset,
+            )
+            .unwrap();
+    }
+    let dataset = &state.dataset;
+    let zones_on = |date| {
+        zone_slices(dataset, date, &Utc)
+            .into_iter()
+            .map(|zone| zone.id)
+            .collect::<Vec<_>>()
+    };
+    assert!(zones_on(first_day - Days::new(1)).is_empty());
+    assert_eq!(zones_on(first_day), [old_zone_id]);
+    assert!(zones_on(holiday).is_empty());
+    assert_eq!(zones_on(last_day), [old_zone_id, child_id]);
+    assert_eq!(zones_on(new_job), [new_zone_id]);
+    assert_eq!(
+        zone_breakdown(dataset, first_day, &Utc)[&Some(old_zone_id)].planned_ms,
+        60 * 60_000
+    );
+    assert_eq!(
+        zone_breakdown(dataset, last_day, &Utc)[&Some(old_zone_id)].planned_ms,
+        30 * 60_000
+    );
+    assert!(!zone_breakdown(dataset, holiday, &Utc).contains_key(&Some(old_zone_id)));
+
+    let holiday_report = report(dataset, holiday, Span::Day, Some(Kind::Work), &Utc);
+    assert_eq!(holiday_report.sessions, 1);
+    assert_eq!(holiday_report.active_ms, 60 * 60_000);
+    assert_eq!(holiday_report.alignment.ratio(), None);
+    let hour = hourly_alignment(dataset, new_job, &Utc)[10];
+    assert_eq!(hour.matched_ms, 120 * 60_000);
+    assert_eq!(hour.other_ms, 0);
+}
+
+#[test]
+fn invalid_zone_dates_are_rejected_in_edits_and_imports() {
+    let id = Uuid::new_v4();
+    let mut state = TrackerState::default();
+    let existing = zone(None);
+    state
+        .execute(Command::SaveZone(id, existing.clone()), time(9, 0))
+        .unwrap();
+    let invalid = Zone {
+        starts_on: Some(date() + Days::new(1)),
+        ends_on: Some(date()),
+        ..existing.clone()
+    };
+    assert!(
+        state
+            .execute(Command::SaveZone(id, invalid.clone()), time(9, 0))
+            .is_err()
+    );
+    assert_eq!(state.dataset.zones[&id], existing);
+
+    let mut malformed = Dataset::default();
+    malformed.zones.insert(id, invalid);
+    let archive = export_archive(&malformed, ArchiveScope::Settings).unwrap();
+    assert!(
+        read_archive(&archive)
+            .unwrap()
+            .apply(&state.dataset, false)
+            .is_err()
     );
 }
 

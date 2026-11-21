@@ -1,29 +1,18 @@
-pub mod cloud;
-mod merge;
-
-pub use merge::{Conflict, Preference, merge};
-
 use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result, ensure};
+use app_platform::cloud::CloudState;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tracking_core::{Dataset, Kind, Timer};
-use uuid::Uuid;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Account {
-    pub project: String,
-    pub user: Uuid,
-}
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct LocalState {
     pub dataset: Dataset,
     pub timer: Option<Timer>,
     pub next_kind: Kind,
-    pub account: Option<Account>,
-    pub baseline: Option<Dataset>,
+    #[serde(default)]
+    pub cloud: CloudState,
 }
 
 pub struct Database {

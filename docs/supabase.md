@@ -1,0 +1,53 @@
+# Подключение своего проекта Supabase
+
+Tracking предлагает подключение при первом запуске. Можно выбрать **Продолжить локально** и вернуться к настройке через **Настройки → Синхронизация Supabase**. URL проекта и публичный ключ сохраняются на устройстве или в текущем браузере. Для каждого клиента настройка выполняется отдельно.
+
+## 1. Создайте проект и таблицу
+
+1. Создайте проект в Supabase. В настройках **Integrations → Data API** убедитесь, что Data API включён и в списке **Exposed schemas** есть `public`.
+2. Откройте **SQL Editor → New query**. Вставьте и выполните миграцию `20261120000000_tracking_state.sql` один раз. Она создаёт таблицу `public.tracking_state`, выдаёт права роли `authenticated` и включает RLS. Каждый пользователь может читать и менять только свою строку. [Миграция](../supabase/migrations/20261120000000_tracking_state.sql)
+3. Откройте **Connect** в проекте и скопируйте **Project URL** вида `https://<project-ref>.supabase.co` и **Publishable key** вида `sb_publishable_…`. Ключ также доступен в **Settings → API Keys**. Для старых проектов Tracking принимает публичный ключ `anon`. Пароль Postgres, ключи `sb_secret_…` и `service_role` храните на сервере. [Ключи Supabase](https://supabase.com/docs/guides/api/api-keys)
+
+## 2. Подготовьте отправителя в Brevo
+
+1. В Brevo откройте **Settings → Senders, Domains, IPs → Domains**. Добавьте свой домен, внесите DNS-записи, которые покажет Brevo, и дождитесь подтверждения.
+2. На вкладке **Senders** добавьте адрес отправителя на этом домене, например `tracking@example.com`. Завершите проверку адреса, если Brevo её запросит.
+3. В **Settings → SMTP & API → SMTP** скопируйте **Login** и выберите **Generate a new SMTP key**. Сохраните сгенерированный SMTP-ключ в менеджере паролей. Он отображается полностью при создании. [SMTP Brevo](https://help.brevo.com/hc/en-us/articles/7924908994450-Send-transactional-emails-using-Brevo-SMTP) · [Создание SMTP-ключа](https://help.brevo.com/hc/en-us/articles/7959631848850-Create-and-manage-your-SMTP-keys)
+
+## 3. Подключите Brevo к Supabase Auth
+
+В Supabase откройте **Authentication → Emails → SMTP Settings**, включите **Custom SMTP** и заполните поля.
+
+| Поле | Значение |
+| --- | --- |
+| Sender email address | Адрес отправителя, настроенный в Brevo |
+| Sender name | `Tracking` |
+| Host | `smtp-relay.brevo.com` |
+| Port | `587` |
+| Username | Значение **Login** на вкладке SMTP в Brevo, например `…@smtp-brevo.com` |
+| Password | Сгенерированный SMTP-ключ Brevo |
+
+Сохраните настройки. SMTP-ключ нужен только Supabase Auth. После включения SMTP проверьте ограничения отправки в **Authentication → Rate Limits**. Лимиты Supabase и квота Brevo действуют одновременно. [Настройка SMTP в Supabase](https://supabase.com/docs/guides/auth/auth-smtp) · [Порты SMTP Brevo](https://help.brevo.com/hc/en-us/articles/10905415650322-Which-SMTP-port-should-I-use-Port-587-465-or-2525)
+
+## 4. Настройте письмо с кодом и добавьте пользователя
+
+1. В **Authentication → Sign In / Providers** включите **Email**. Для личного проекта выключите **Allow new users to sign up**, чтобы добавлять пользователей через Dashboard.
+2. В **Authentication → Emails → Templates → Magic Link** задайте тему, например `Код входа в Tracking`, и замените тело письма шаблоном ниже. `{{ .Token }}` подставляет цифровой код. Для этого способа входа достаточно кода, поэтому в шаблоне можно оставить только его. На новых проектах Free редактирование шаблонов доступно после настройки внешнего SMTP. [Email OTP](https://supabase.com/docs/guides/auth/auth-email-passwordless#with-otp) · [Ограничение Free](https://supabase.com/changelog/46599-changes-to-email-template-customisation-on-free-tier)
+
+   ```html
+   <h2>Вход в Tracking</h2>
+   <p>Код для входа: <strong>{{ .Token }}</strong></p>
+   ```
+
+3. В **Authentication → Users → Add user** создайте пользователя с вашим email. Для **Create new user** задайте случайный уникальный пароль, если Dashboard запрашивает его, и включите **Auto Confirm User** для своего проверенного адреса. Для другого человека можно выбрать **Send invitation** и попросить его подтвердить адрес по письму. Tracking запрашивает OTP для существующего аккаунта. [Пользователи Supabase Auth](https://supabase.com/docs/guides/auth/users)
+
+## 5. Подключите Tracking и проверьте синхронизацию
+
+1. Нажмите **Настроить Supabase**, введите **Project URL** и **Publishable key**, затем нажмите **Сохранить подключение**.
+2. Введите email из **Authentication → Users**, нажмите **Отправить код**, затем введите цифры из письма и нажмите **Войти**. Сессия хранится в памяти. После перезапуска приложения или перезагрузки страницы нужен новый код.
+3. Нажмите **Синхронизировать**. Tracking объединит историю, категории, зоны и настройки. При конфликте он предложит выбрать локальные или облачные изменения для конфликтующих записей. Активный таймер хранится локально.
+4. Повторите подключение на втором устройстве или в браузере с тем же проектом и email. После **Синхронизировать** проверьте, что там появилась тестовая сессия. Синхронизация выполняется по кнопке.
+
+При выходе данные остаются в локальном профиле. При входе в другой аккаунт Tracking попросит явно подтвердить объединение с его данными.
+
+Если письмо не пришло, проверьте **Auth Logs** в Supabase, **Transactional → Logs** в Brevo и папку «Спам». При отправке ссылки вместо кода проверьте `{{ .Token }}` в шаблоне **Magic Link**. Если вход прошёл, а синхронизация сообщает об отсутствии таблицы или прав, проверьте Data API и миграцию из первого шага. [Журналы Supabase](https://supabase.com/docs/guides/telemetry/logs)

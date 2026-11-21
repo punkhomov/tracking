@@ -3,15 +3,9 @@ use std::{
     fmt,
 };
 
+use app_platform::cloud::Preference;
 use tracking_core::Dataset;
 use uuid::Uuid;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Preference {
-    Ask,
-    Local,
-    Remote,
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Conflict {
@@ -121,5 +115,47 @@ fn choose<'a, T: Eq>(
         } else {
             local
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracking_core::Category;
+
+    #[test]
+    fn independent_changes_and_deletes_merge_and_same_record_changes_conflict() {
+        let mut base = Dataset::default();
+        let id = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let category = Category {
+            name: "Работа".into(),
+            color: "#39548d".into(),
+            archived: false,
+        };
+        base.categories.insert(id, category.clone());
+        let mut local = base.clone();
+        let mut remote = base.clone();
+        local.categories.remove(&id);
+        remote.categories.insert(other, category.clone());
+        let merged = merge(&base, &local, &remote, Preference::Ask).unwrap();
+        assert!(!merged.categories.contains_key(&id));
+        assert_eq!(merged.categories.get(&other), Some(&category));
+
+        remote.categories.get_mut(&id).unwrap().name = "Обновление".into();
+        assert_eq!(
+            merge(&base, &local, &remote, Preference::Ask)
+                .unwrap_err()
+                .count,
+            1
+        );
+        assert_eq!(
+            merge(&base, &local, &remote, Preference::Local).unwrap(),
+            merged
+        );
+        assert_eq!(
+            merge(&base, &local, &remote, Preference::Remote).unwrap(),
+            remote
+        );
     }
 }

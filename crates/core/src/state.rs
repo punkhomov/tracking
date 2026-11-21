@@ -37,6 +37,7 @@ pub enum Command {
     DeleteZone(Uuid),
     SaveSettings(Settings),
     Import(Box<ImportArchive>, bool),
+    ApplySyncedDataset(Box<Dataset>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -152,6 +153,10 @@ impl TrackerState {
                 );
                 self.dataset = archive.apply(&self.dataset, replace)?;
             }
+            Command::ApplySyncedDataset(dataset) => {
+                dataset.validate()?;
+                self.dataset = *dataset;
+            }
         }
         Ok(())
     }
@@ -203,6 +208,7 @@ impl TrackerState {
             !zone.weekdays.is_empty() && zone.weekdays.iter().all(|day| *day < 7),
             "Выберите дни недели."
         );
+        zone.validate_dates()?;
         let children = self
             .dataset
             .zones

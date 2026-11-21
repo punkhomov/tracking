@@ -6,16 +6,15 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-chrono.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+app-platform.workspace = true
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 tracking-core.workspace = true
-uuid.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 tempfile = "3"

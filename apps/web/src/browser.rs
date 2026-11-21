@@ -1,75 +1,89 @@
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use anyhow::{Context, Result, anyhow, ensure};
-use app_platform::{ArchiveFile, Complete, Platform, SaveComplete};
+use app_platform::{
+    ArchiveFile, Complete, Platform, SaveComplete,
+    cloud::{CloudComplete, CloudRequest, CloudState},
+};
 use app_ui::Tracker;
 use chrono::Utc;
 use eframe::{
     egui,
     wasm_bindgen::{JsCast, JsValue},
 };
-use rexie::{ObjectStore, Rexie, TransactionMode};
+use idb::{
+    Database, ObjectStore, TransactionMode,
+    builder::{DatabaseBuilder, ObjectStoreBuilder},
+};
 use serde::{Deserialize, Serialize};
 use tracking_core::TrackerState;
 
 const STORE: &str = "snapshot";
 const KEY: &str = "tracker";
 
-#[derive(Deserialize, Serialize)]
+#[derive(Default, Deserialize, Serialize)]
 struct Snapshot {
     revision: u64,
     state: TrackerState,
+    #[serde(default)]
+    cloud: CloudState,
 }
 
 #[derive(Clone)]
 struct BrowserStore {
-    database: Rc<Rexie>,
+    database: Rc<Database>,
     revision: Rc<Cell<u64>>,
+    cloud: Rc<RefCell<Option<tracking_cloud::Service>>>,
 }
 
 impl BrowserStore {
-    async fn open() -> Result<(Self, TrackerState)> {
-        let database = Rexie::builder("tracking-app")
+    async fn open() -> Result<(Self, Snapshot)> {
+        let database = DatabaseBuilder::new("tracking-app")
             .version(1)
-            .add_object_store(ObjectStore::new(STORE))
+            .add_object_store(ObjectStoreBuilder::new(STORE))
             .build()
             .await?;
         let transaction = database.transaction(&[STORE], TransactionMode::ReadOnly)?;
-        let snapshot = read(&transaction.store(STORE)?).await?;
-        transaction.done().await?;
+        let snapshot = read(&transaction.object_store(STORE)?).await?;
+        transaction.await?;
 
-        let (revision, state) = snapshot.map_or_else(
-            || (0, TrackerState::default()),
-            |snapshot| (snapshot.revision, snapshot.state),
-        );
-        state.dataset.validate()?;
+        let snapshot = snapshot.unwrap_or_default();
+        snapshot.state.dataset.validate()?;
         Ok((
             Self {
                 database: Rc::new(database),
-                revision: Rc::new(Cell::new(revision)),
+                revision: Rc::new(Cell::new(snapshot.revision)),
+                cloud: Rc::new(RefCell::new(Some(tracking_cloud::Service::default()))),
             },
-            state,
+            snapshot,
         ))
     }
 
-    async fn write(&self, state: TrackerState) -> Result<()> {
+    async fn write(&self, state: TrackerState, cloud: CloudState) -> Result<()> {
         let previous = self.revision.get();
         let revision = previous
             .checked_add(1)
             .context("Исчерпаны ревизии хранилища.")?;
-        let value = JsValue::from_str(&serde_json::to_string(&Snapshot { revision, state })?);
+        let value = JsValue::from_str(&serde_json::to_string(&Snapshot {
+            revision,
+            state,
+            cloud,
+        })?);
         let transaction = self
             .database
             .transaction(&[STORE], TransactionMode::ReadWrite)?;
-        let store = transaction.store(STORE)?;
+        let store = transaction.object_store(STORE)?;
         let stored = read(&store).await?.map_or(0, |snapshot| snapshot.revision);
         ensure!(
             previous == stored,
             "Данные изменились в другой вкладке. Перезагрузите страницу."
         );
-        store.put(&value, Some(&JsValue::from_str(KEY))).await?;
+        store.put(&value, Some(&JsValue::from_str(KEY)))?.await?;
         ensure!(
-            transaction.done().await?.is_committed(),
+            transaction.await?.is_committed(),
             "Не удалось сохранить данные."
         );
         self.revision.set(revision);
@@ -77,9 +91,9 @@ impl BrowserStore {
     }
 }
 
-async fn read(store: &rexie::Store) -> Result<Option<Snapshot>> {
+async fn read(store: &ObjectStore) -> Result<Option<Snapshot>> {
     store
-        .get(JsValue::from_str(KEY))
+        .get(JsValue::from_str(KEY))?
         .await?
         .map(|value| {
             let snapshot = value.as_string().context("Неверный формат хранилища.")?;
@@ -89,11 +103,29 @@ async fn read(store: &rexie::Store) -> Result<Option<Snapshot>> {
 }
 
 impl Platform for BrowserStore {
-    fn save(&mut self, state: &TrackerState, complete: SaveComplete) {
+    fn save(&mut self, state: &TrackerState, cloud: &CloudState, complete: SaveComplete) {
         let store = self.clone();
         let state = state.clone();
+        let cloud = cloud.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            complete(store.write(state).await.context("Сохранение в браузере"));
+            complete(
+                store
+                    .write(state, cloud)
+                    .await
+                    .context("Сохранение в браузере"),
+            );
+        });
+    }
+
+    fn cloud(&mut self, request: CloudRequest, complete: CloudComplete) {
+        let Some(mut service) = self.cloud.take() else {
+            return complete(Err(anyhow!("Запрос к Supabase уже выполняется.")));
+        };
+        let cloud = self.cloud.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = service.execute(request).await;
+            cloud.replace(Some(service));
+            complete(result);
         });
     }
     fn open_archive(&self, complete: Complete<Option<ArchiveFile>>) {
@@ -275,14 +307,20 @@ async fn start(document: &web_sys::Document) -> Result<()> {
         .get_element_by_id("tracking")
         .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
         .context("Не найден canvas приложения.")?;
-    let (store, state) = BrowserStore::open()
+    let (store, snapshot) = BrowserStore::open()
         .await
         .context("Не удалось открыть IndexedDB.")?;
     eframe::WebRunner::new()
         .start(
             canvas,
             eframe::WebOptions::default(),
-            Box::new(move |_| Ok(Box::new(WebApp(Tracker::new(state, store))))),
+            Box::new(move |_| {
+                Ok(Box::new(WebApp(Tracker::new(
+                    snapshot.state,
+                    snapshot.cloud,
+                    store,
+                ))))
+            }),
         )
         .await
         .map_err(|error| anyhow!("Ошибка запуска eframe: {error:?}"))

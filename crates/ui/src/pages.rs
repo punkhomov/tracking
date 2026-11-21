@@ -312,14 +312,15 @@ impl Tracker {
         }
     }
 
-    pub(crate) fn zones(&mut self, ui: &mut Ui, _now: DateTime<Utc>) {
+    pub(crate) fn zones(&mut self, ui: &mut Ui, now: DateTime<Utc>) {
         let mut editor = None;
         let dataset = &self.state.dataset;
+        let today = now.with_timezone(&Local).date_naive();
         card(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.heading("Зоны таймлайна");
                 if primary(ui, "Добавить зону").clicked() {
-                    editor = Some(Editor::new_zone(None, None, dataset));
+                    editor = Some(Editor::new_zone(None, None, dataset, today));
                 }
             });
             if dataset.zones.is_empty() {
@@ -362,6 +363,22 @@ impl Tracker {
                         ui.weak(days);
                     });
                     ui.horizontal_wrapped(|ui| {
+                        let format = date_format(&dataset.settings);
+                        if let Some(start) = zone.starts_on {
+                            ui.weak(format!("С {}", start.format(format)));
+                        }
+                        if let Some(end) = zone.ends_on {
+                            ui.weak(format!("По {}", end.format(format)));
+                        }
+                        if zone.ends_on.is_some_and(|end| end < today)
+                            || zone
+                                .parent
+                                .and_then(|id| dataset.zones.get(&id))
+                                .and_then(|parent| parent.ends_on)
+                                .is_some_and(|end| end < today)
+                        {
+                            ui.weak("Завершена");
+                        }
                         if let Some(category) = zone.category {
                             ui.weak(category_name(dataset, Some(category)));
                         }
@@ -369,11 +386,11 @@ impl Tracker {
                             ui.weak("Скрыта");
                         }
                         if ui.button("Изменить").clicked() {
-                            editor = Some(Editor::new_zone(Some(id), None, dataset));
+                            editor = Some(Editor::new_zone(Some(id), None, dataset, today));
                         }
                         if zone.parent.is_none() && ui.button("Добавить вложенную").clicked()
                         {
-                            editor = Some(Editor::new_zone(None, Some(id), dataset));
+                            editor = Some(Editor::new_zone(None, Some(id), dataset, today));
                         }
                         if ui.button("Удалить").clicked() {
                             editor = Some(Editor::confirm(
@@ -392,6 +409,7 @@ impl Tracker {
     }
 
     pub(crate) fn settings(&mut self, ui: &mut Ui, now: DateTime<Utc>) {
+        self.cloud_settings(ui);
         let mut save = false;
         card(ui, |ui| {
             ui.heading("Таймер");

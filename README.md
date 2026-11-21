@@ -66,14 +66,15 @@ ZIP будет доступен в артефактах запуска.
 
 ## Supabase
 
-Сейчас приложение работает с локальными данными. Клиент Auth и PostgREST
-для будущего подключения находится в `crates/data`. Схема с RLS подготовлена
-отдельной миграцией. [Миграция Supabase](supabase/migrations/20261120000000_tracking_state.sql)
+На первом запуске можно подключить свой проект Supabase или продолжить локально.
+Tracking принимает URL проекта и публичный ключ в настройках, входит по коду
+из письма и синхронизирует данные по кнопке. [Настройка Supabase, OTP и Brevo](docs/supabase.md)
 
 ## Структура
 
 - `crates/core` — таймер, модель сессий, расчёт активного времени и JSON-архив.
-- `crates/data` — SQLite, клиент Supabase и правила объединения данных.
+- `crates/data` — локальное хранилище SQLite.
+- `crates/cloud` — Supabase Auth, Data API и объединение данных.
 - `crates/ui` и `crates/platform` — экран egui и контракт сохранения.
 - `apps/desktop` и `apps/web` — точки запуска eframe.
 

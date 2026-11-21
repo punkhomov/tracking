@@ -1,4 +1,5 @@
 mod charts;
+mod cloud;
 mod editors;
 mod pages;
 mod theme;
@@ -8,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use app_platform::{ArchiveFile, Complete, Platform};
+use app_platform::{ArchiveFile, Complete, Platform, cloud::CloudState};
 use chrono::{DateTime, Local, Utc};
 use egui::{Align, ComboBox, Context, Frame, Layout, Margin, RichText, Ui};
 use tracking_core::{
@@ -18,6 +19,7 @@ use uuid::Uuid;
 
 use self::{
     charts::{DailyCache, ReportCache},
+    cloud::CloudPanel,
     editors::Editor,
     pages::{HistoryFilters, Screen},
     theme::{accent, card, primary},
@@ -28,6 +30,7 @@ pub struct Tracker {
     platform: Box<dyn Platform>,
     styles: [Arc<egui::Style>; 2],
     pending: Option<Pending>,
+    cloud: CloudPanel,
     io: Option<mpsc::Receiver<Result<IoEvent, String>>>,
     screen: Screen,
     editor: Option<Editor>,
@@ -47,6 +50,7 @@ pub struct Tracker {
 
 struct Pending {
     state: TrackerState,
+    cloud: Option<CloudState>,
     completed: mpsc::Receiver<Result<(), String>>,
     close_editor: bool,
     message: Option<&'static str>,
@@ -59,7 +63,7 @@ enum IoEvent {
 }
 
 impl Tracker {
-    pub fn new(state: TrackerState, platform: impl Platform + 'static) -> Self {
+    pub fn new(state: TrackerState, cloud: CloudState, platform: impl Platform + 'static) -> Self {
         let mut note = String::new();
         let mut category = None;
         if let Some(timer) = &state.timer {
@@ -72,6 +76,7 @@ impl Tracker {
             platform: Box::new(platform),
             styles: [Arc::new(theme::style(false)), Arc::new(theme::style(true))],
             pending: None,
+            cloud: CloudPanel::new(cloud),
             io: None,
             screen: Screen::Today,
             editor: None,
@@ -92,6 +97,7 @@ impl Tracker {
     pub fn ui(&mut self, ui: &mut Ui, now: DateTime<Utc>) {
         self.poll_save();
         self.poll_io();
+        self.poll_cloud(now, ui.ctx());
         self.update_timer(now, ui.ctx());
         let dark = match self.state.dataset.settings.theme.as_str() {
             "dark" => true,
@@ -114,7 +120,8 @@ impl Tracker {
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                         ui.set_width(width);
                         self.header(ui);
-                        let busy = self.pending.is_some() || self.io.is_some();
+                        let busy =
+                            self.pending.is_some() || self.io.is_some() || self.cloud.syncing();
                         ui.add_enabled_ui(!busy, |ui| {
                             egui::ScrollArea::vertical()
                                 .id_salt(self.screen)
@@ -153,6 +160,8 @@ impl Tracker {
         }
         if self.pending.is_some() {
             ui.weak("Сохранение…");
+        } else if self.cloud.syncing() {
+            ui.weak("Синхронизация…");
         } else if self.io.is_some() {
             ui.weak("Операция с файлом или разрешениями…");
         }
@@ -170,6 +179,7 @@ impl Tracker {
     fn screen(&mut self, ui: &mut Ui, now: DateTime<Utc>) {
         match self.screen {
             Screen::Today => {
+                self.offer_cloud(ui);
                 card(ui, |ui| self.timer(ui, now));
                 self.timeline(ui, now);
                 self.today_history(ui, now);
@@ -370,7 +380,7 @@ impl Tracker {
         ctx: &Context,
         close_editor: bool,
     ) {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.cloud.syncing() {
             return;
         }
         let mut next = self.state.clone();
@@ -393,12 +403,28 @@ impl Tracker {
             self.error = Some(error.to_string());
             return;
         }
+        self.persist(next, None, ctx, close_editor, message);
+    }
+
+    fn persist(
+        &mut self,
+        next: TrackerState,
+        cloud: Option<CloudState>,
+        ctx: &Context,
+        close_editor: bool,
+        message: Option<&'static str>,
+    ) {
         self.error = None;
         self.status = None;
         let (send, completed) = mpsc::channel();
-        self.platform.save(&next, completion(send, ctx, |()| ()));
+        self.platform.save(
+            &next,
+            cloud.as_ref().unwrap_or(&self.cloud.state),
+            completion(send, ctx, |()| ()),
+        );
         self.pending = Some(Pending {
             state: next,
+            cloud,
             completed,
             close_editor,
             message,
@@ -454,6 +480,9 @@ impl Tracker {
                     self.status = Some("Изменения сохранены.");
                 }
                 self.state = pending.state;
+                if let Some(cloud) = pending.cloud {
+                    self.cloud.saved(cloud);
+                }
             }
             Ok(Err(error)) => self.error = Some(error),
             Err(mpsc::TryRecvError::Disconnected) => {

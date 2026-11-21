@@ -1,9 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::{io::Write, path::PathBuf};
+use std::{io::Write, path::PathBuf, sync::mpsc};
 
 use anyhow::{Context, Result, anyhow};
-use app_platform::{ArchiveFile, Complete, Platform, SaveComplete};
+use app_platform::{
+    ArchiveFile, Complete, Platform, SaveComplete,
+    cloud::{CloudComplete, CloudRequest, CloudState},
+};
 use app_ui::Tracker;
 use chrono::Utc;
 use eframe::egui;
@@ -39,13 +42,13 @@ fn main() -> Result<()> {
             let store = DesktopStore {
                 database,
                 context: cc.egui_ctx.clone(),
-                local: LocalState {
-                    account: local.account,
-                    baseline: local.baseline,
-                    ..LocalState::default()
-                },
+                cloud: None,
             };
-            Ok(Box::new(DesktopApp(Tracker::new(state, store))))
+            Ok(Box::new(DesktopApp(Tracker::new(
+                state,
+                local.cloud,
+                store,
+            ))))
         }),
     )
     .map_err(|error| anyhow!("{error}"))
@@ -62,15 +65,31 @@ impl eframe::App for DesktopApp {
 struct DesktopStore {
     database: Database,
     context: egui::Context,
-    local: LocalState,
+    cloud: Option<mpsc::Sender<(CloudRequest, CloudComplete)>>,
 }
 
 impl Platform for DesktopStore {
-    fn save(&mut self, state: &TrackerState, complete: SaveComplete) {
-        self.local.dataset = state.dataset.clone();
-        self.local.timer = state.timer.clone();
-        self.local.next_kind = state.next_kind;
-        complete(self.database.save(&self.local));
+    fn save(&mut self, state: &TrackerState, cloud: &CloudState, complete: SaveComplete) {
+        complete(self.database.save(&LocalState {
+            dataset: state.dataset.clone(),
+            timer: state.timer.clone(),
+            next_kind: state.next_kind,
+            cloud: cloud.clone(),
+        }));
+    }
+
+    fn cloud(&mut self, request: CloudRequest, complete: CloudComplete) {
+        let sender = match &self.cloud {
+            Some(sender) => sender,
+            None => match cloud_worker() {
+                Ok(sender) => self.cloud.insert(sender),
+                Err(error) => return complete(Err(error)),
+            },
+        };
+        if let Err(mpsc::SendError((_, complete))) = sender.send((request, complete)) {
+            self.cloud = None;
+            complete(Err(anyhow!("Не удалось запустить запрос к Supabase.")));
+        }
     }
 
     fn open_archive(&self, complete: Complete<Option<ArchiveFile>>) {
@@ -132,6 +151,22 @@ impl Platform for DesktopStore {
     fn system_dark(&self) -> bool {
         self.context.system_theme() == Some(egui::Theme::Dark)
     }
+}
+
+fn cloud_worker() -> Result<mpsc::Sender<(CloudRequest, CloudComplete)>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let (send, receive) = mpsc::channel::<(CloudRequest, CloudComplete)>();
+    std::thread::Builder::new()
+        .name("tracking-cloud".into())
+        .spawn(move || {
+            let mut service = tracking_cloud::Service::default();
+            for (request, complete) in receive {
+                complete(runtime.block_on(service.execute(request)));
+            }
+        })?;
+    Ok(send)
 }
 
 fn notify(title: &str, body: &str) -> Result<()> {

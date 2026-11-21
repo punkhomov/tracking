@@ -18,6 +18,8 @@ eframe = { workspace = true, features = ["accesskit", "x11", "wayland"] }
 notify-rust = "4"
 rfd = "0.18"
 tempfile = "3"
+tokio = { version = "1", features = ["rt"] }
+tracking-cloud.workspace = true
 tracking-core.workspace = true
 tracking-data.workspace = true
 

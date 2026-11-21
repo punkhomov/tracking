@@ -9,10 +9,10 @@ pub use archive::{
 pub use state::{Command, Reminder, TrackerState};
 pub use timer::Timer;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, ensure};
-use chrono::{DateTime, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -113,12 +113,40 @@ pub struct Zone {
     pub start: NaiveTime,
     pub end: NaiveTime,
     pub weekdays: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_on: Option<NaiveDate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends_on: Option<NaiveDate>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub excluded_dates: BTreeSet<NaiveDate>,
     pub parent: Option<Uuid>,
     pub color: Option<String>,
     pub style: ZoneStyle,
     pub full_range: bool,
     pub exclude_from_breakdown: bool,
     pub category: Option<Uuid>,
+}
+
+impl Zone {
+    pub fn is_scheduled_on(&self, date: NaiveDate) -> bool {
+        self.starts_on.is_none_or(|start| start <= date)
+            && self.ends_on.is_none_or(|end| date <= end)
+            && self
+                .weekdays
+                .contains(&(date.weekday().num_days_from_sunday() as u8))
+            && !self.excluded_dates.contains(&date)
+    }
+
+    fn validate_dates(&self) -> Result<()> {
+        if let (Some(start), Some(end)) = (self.starts_on, self.ends_on) {
+            ensure!(
+                end >= start,
+                "Дата окончания зоны «{}» должна быть не раньше даты начала.",
+                self.name
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +222,7 @@ impl Dataset {
             );
         }
         for (id, zone) in &self.zones {
+            zone.validate_dates()?;
             ensure!(
                 !zone.name.trim().is_empty()
                     && zone.start < zone.end
