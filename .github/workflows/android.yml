@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
@@ -20,15 +20,18 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0 ndk;28.2.13676358'
+          log-accepted-android-sdk-licenses: false
       - name: Verify Rust adapter
         run: |
           cargo test --locked -p tracking-android
           cargo clippy --locked -p tracking-android --all-targets -- -D warnings
-      - name: Install Android build tools
+      - name: Install Rust Android targets
         run: |
           rustup target add aarch64-linux-android x86_64-linux-android
           cargo install --locked cargo-ndk --version 4.1.2
-          sdkmanager --install 'platforms;android-36' 'build-tools;35.0.0' 'ndk;28.2.13676358'
       - name: Assemble app and instrumentation APKs
         working-directory: apps/android
         run: ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest
