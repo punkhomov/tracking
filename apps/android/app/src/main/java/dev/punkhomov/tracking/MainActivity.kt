@@ -1,7 +1,9 @@
 package dev.punkhomov.tracking
 
+import android.graphics.Color.TRANSPARENT
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -33,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -40,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -90,6 +94,15 @@ class MainActivity : ComponentActivity() {
                 "dark" -> true
                 else -> isSystemInDarkTheme()
             }
+            LaunchedEffect(dark) {
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.auto(TRANSPARENT, TRANSPARENT) { dark },
+                    navigationBarStyle = SystemBarStyle.auto(
+                        lightColors.surface.toArgb(),
+                        darkColors.surface.toArgb(),
+                    ) { dark },
+                )
+            }
             MaterialTheme(colorScheme = if (dark) darkColors else lightColors) {
                 TrackingScreen(state, model)
             }
@@ -124,7 +137,7 @@ private fun TrackingScreen(state: TrackingState, model: TrackerViewModel) {
     val cloud by model.cloud.collectAsStateWithLifecycle()
     BackHandler(enabled = screen != Screen.Timer) { screen = Screen.Timer }
 
-    Scaffold { insets ->
+    Scaffold(containerColor = MaterialTheme.colorScheme.surface) { insets ->
         Column(Modifier.fillMaxSize().padding(insets).imePadding()) {
             Text(
                 "Tracking",

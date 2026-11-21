@@ -1,15 +1,18 @@
 package dev.punkhomov.tracking
 
+import android.content.res.Configuration
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
+import androidx.core.view.WindowCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Rule
 import org.junit.Test
@@ -57,6 +60,38 @@ class TimerSmokeTest {
         compose.onNodeWithText("Тестовая категория").assertIsDisplayed()
         compose.onNodeWithText("В архив").performScrollTo().performClick()
         awaitText("В архиве")
+    }
+
+    @Test
+    fun systemBarsFollowSavedTheme() {
+        awaitText("Настройки")
+        val systemDark = (compose.activity.resources.configuration.uiMode and
+            Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        compose.onNodeWithText("Настройки").performScrollTo().performClick()
+        awaitText("Тема · Системная")
+        awaitSystemBars(lightBackground = !systemDark)
+
+        for ((theme, dark) in listOf("Светлая" to false, "Тёмная" to true, "Системная" to systemDark)) {
+            compose.onNode(hasText("Тема · ", substring = true)).performScrollTo().performClick()
+            compose.onNodeWithText(theme).performClick()
+            compose.onNodeWithText("Сохранить настройки").performScrollTo().performClick()
+            compose.waitUntil(10_000) {
+                compose.onAllNodes(hasText("Сохранить настройки") and isEnabled())
+                    .fetchSemanticsNodes().size == 1
+            }
+            awaitSystemBars(lightBackground = !dark)
+        }
+    }
+
+    private fun awaitSystemBars(lightBackground: Boolean) {
+        compose.waitUntil(conditionDescription = "System bar icons match the app theme", timeoutMillis = 10_000) {
+            val window = compose.activity.window
+            compose.runOnIdle {
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                controller.isAppearanceLightStatusBars == lightBackground &&
+                    controller.isAppearanceLightNavigationBars == lightBackground
+            }
+        }
     }
 
     private fun awaitText(text: String) {
