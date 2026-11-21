@@ -18,7 +18,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - run: cargo build --locked -p app-desktop
-      - run: cargo test --locked -p app-platform -p tracking-cloud -p tracking-core -p tracking-data
+      - run: cargo test --locked -p app-platform -p tracking-cloud -p tracking-core -p tracking-data -p app-ui
       - run: cargo clippy --locked -p app-desktop -p app-ui -p tracking-core --all-targets -- -D warnings
 
   web:

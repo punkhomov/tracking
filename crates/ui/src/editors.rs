@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-use egui::{Color32, ComboBox, Context, Frame, Id, Modal, ScrollArea, Ui};
+use egui::{Color32, ComboBox, Context, Id, Modal, ScrollArea, Ui};
 use tracking_core::{
     Category, Command, Dataset, ImportArchive, Kind, Period, Zone, ZoneStyle, read_archive,
 };
@@ -269,37 +269,28 @@ impl Tracker {
             return;
         };
         let busy = self.pending.is_some();
-        let dark = match self.state.dataset.settings.theme.as_str() {
-            "dark" => true,
-            "light" => false,
-            _ => self.platform.system_dark(),
-        };
-        let style = self.styles[usize::from(dark)].clone();
         let mut cancel = false;
         let mut submit = false;
         let label = editor.submit_label();
-        let response = Modal::new(Id::new("tracking-editor"))
-            .frame(Frame::popup(&style))
-            .show(ctx, |ui| {
-                ui.set_style(style.clone());
-                ui.set_width((ctx.content_rect().width() - 58.0).clamp(245.0, 490.0));
-                ui.heading(editor.title());
-                ScrollArea::vertical()
-                    .max_height((ctx.content_rect().height() - 145.0).max(130.0))
-                    .show(ui, |ui| {
-                        ui.add_enabled_ui(!busy, |ui| editor.body(ui, &self.state.dataset));
-                    });
-                if let Some(error) = &self.error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                }
-                ui.separator();
-                ui.add_enabled_ui(!busy, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        submit = primary(ui, label).clicked();
-                        cancel = ui.button("Отмена").clicked();
-                    });
+        let response = Modal::new(Id::new("tracking-editor")).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 58.0).clamp(245.0, 490.0));
+            ui.heading(editor.title());
+            ScrollArea::vertical()
+                .max_height((ctx.content_rect().height() - 145.0).max(130.0))
+                .show(ui, |ui| {
+                    ui.add_enabled_ui(!busy, |ui| editor.body(ui, &self.state.dataset));
+                });
+            if let Some(error) = &self.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            ui.separator();
+            ui.add_enabled_ui(!busy, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    submit = primary(ui, label).clicked();
+                    cancel = ui.button("Отмена").clicked();
                 });
             });
+        });
         if busy {
             return;
         }

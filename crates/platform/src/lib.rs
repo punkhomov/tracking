@@ -21,5 +21,4 @@ pub trait Platform {
     fn notify(&self, title: &str, body: &str);
     fn request_notifications(&self, complete: Complete<bool>);
     fn set_title(&self, title: &str);
-    fn system_dark(&self) -> bool;
 }

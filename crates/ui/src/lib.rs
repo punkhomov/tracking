@@ -4,10 +4,7 @@ mod editors;
 mod pages;
 mod theme;
 
-use std::{
-    sync::{Arc, mpsc},
-    time::Duration,
-};
+use std::{sync::mpsc, time::Duration};
 
 use app_platform::{ArchiveFile, Complete, Platform, cloud::CloudState};
 use chrono::{DateTime, Local, Utc};
@@ -28,7 +25,6 @@ use self::{
 pub struct Tracker {
     state: TrackerState,
     platform: Box<dyn Platform>,
-    styles: [Arc<egui::Style>; 2],
     pending: Option<Pending>,
     cloud: CloudPanel,
     io: Option<mpsc::Receiver<Result<IoEvent, String>>>,
@@ -63,7 +59,13 @@ enum IoEvent {
 }
 
 impl Tracker {
-    pub fn new(state: TrackerState, cloud: CloudState, platform: impl Platform + 'static) -> Self {
+    pub fn new(
+        ctx: &Context,
+        state: TrackerState,
+        cloud: CloudState,
+        platform: impl Platform + 'static,
+    ) -> Self {
+        theme::install(ctx, &state.dataset.settings.theme);
         let mut note = String::new();
         let mut category = None;
         if let Some(timer) = &state.timer {
@@ -74,7 +76,6 @@ impl Tracker {
             settings: state.dataset.settings.clone(),
             state,
             platform: Box::new(platform),
-            styles: [Arc::new(theme::style(false)), Arc::new(theme::style(true))],
             pending: None,
             cloud: CloudPanel::new(cloud),
             io: None,
@@ -95,17 +96,10 @@ impl Tracker {
     }
 
     pub fn ui(&mut self, ui: &mut Ui, now: DateTime<Utc>) {
-        self.poll_save();
+        self.poll_save(ui.ctx());
         self.poll_io();
         self.poll_cloud(now, ui.ctx());
         self.update_timer(now, ui.ctx());
-        let dark = match self.state.dataset.settings.theme.as_str() {
-            "dark" => true,
-            "light" => false,
-            _ => self.platform.system_dark(),
-        };
-        ui.set_style(self.styles[usize::from(dark)].clone());
-
         egui::CentralPanel::default()
             .frame(
                 Frame::new()
@@ -440,7 +434,7 @@ impl Tracker {
         });
     }
 
-    fn poll_save(&mut self) {
+    fn poll_save(&mut self, ctx: &Context) {
         let Some(pending) = self.pending.take() else {
             return;
         };
@@ -451,6 +445,14 @@ impl Tracker {
                 }
                 if self.state.dataset.settings != pending.state.dataset.settings {
                     self.settings = pending.state.dataset.settings.clone();
+                }
+                if self.state.dataset.settings.theme != pending.state.dataset.settings.theme {
+                    ctx.set_theme(theme::preference(&self.settings.theme));
+                    // The next pass selects the font atlas for the new theme.
+                    ctx.request_discard("Tracking theme changed");
+                    if !ctx.will_discard() {
+                        ctx.request_repaint();
+                    }
                 }
                 let prev = self.state.timer.as_ref().map(|timer| timer.id);
                 let next = pending.state.timer.as_ref().map(|timer| timer.id);

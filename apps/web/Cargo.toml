@@ -20,7 +20,7 @@ tracking-core.workspace = true
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
     "Blob", "BlobPropertyBag", "Document", "Element", "EventTarget", "File", "FileList", "HtmlAnchorElement",
-    "HtmlAudioElement", "HtmlCanvasElement", "HtmlElement", "HtmlInputElement", "HtmlMediaElement", "MediaQueryList", "Node",
+    "HtmlAudioElement", "HtmlCanvasElement", "HtmlElement", "HtmlInputElement", "HtmlMediaElement", "Node",
     "Notification", "NotificationOptions", "NotificationPermission", "Url", "Window",
 ] }
 

@@ -1,6 +1,24 @@
-use egui::{Color32, FontId, Frame, Margin, RichText, Stroke, Style, TextStyle, Ui, Visuals, vec2};
+use egui::{
+    Color32, Context, FontId, Frame, Margin, RichText, Stroke, Style, TextStyle, Theme,
+    ThemePreference, Ui, Visuals, vec2,
+};
 
-pub fn style(dark: bool) -> Style {
+pub fn install(ctx: &Context, saved_theme: &str) {
+    ctx.set_style_of(Theme::Light, style(false));
+    ctx.set_style_of(Theme::Dark, style(true));
+    ctx.options_mut(|options| options.fallback_theme = Theme::Light);
+    ctx.set_theme(preference(saved_theme));
+}
+
+pub fn preference(saved_theme: &str) -> ThemePreference {
+    match saved_theme {
+        "light" => ThemePreference::Light,
+        "dark" => ThemePreference::Dark,
+        _ => ThemePreference::System,
+    }
+}
+
+fn style(dark: bool) -> Style {
     let mut style = Style {
         visuals: if dark {
             Visuals::dark()
@@ -79,4 +97,45 @@ pub fn card<R>(ui: &mut Ui, body: impl FnOnce(&mut Ui) -> R) -> R {
             body(ui)
         })
         .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{RawInput, epaint::FontColorTransferFunction};
+
+    use super::*;
+
+    #[test]
+    fn font_atlas_uses_the_same_theme_as_the_visible_interface() {
+        let ctx = Context::default();
+        install(&ctx, "light");
+
+        for (saved_theme, system_theme, dark) in [
+            ("light", Some(Theme::Dark), false),
+            ("dark", Some(Theme::Light), true),
+            ("system", None, false),
+            ("system", Some(Theme::Dark), true),
+            ("system", Some(Theme::Light), false),
+        ] {
+            ctx.set_theme(preference(saved_theme));
+            let input = RawInput {
+                system_theme,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                ui.label("Сегодня");
+                assert_eq!(ui.visuals().dark_mode, dark);
+                let expected = if dark {
+                    FontColorTransferFunction::DARK_MODE_DEFAULT
+                } else {
+                    FontColorTransferFunction::LIGHT_MODE_DEFAULT
+                };
+                ctx.fonts(|fonts| {
+                    assert_eq!(fonts.options().color_transfer_function, expected);
+                    assert!(fonts.options().subpixel_binning);
+                });
+            });
+            output.textures_delta.clear();
+        }
+    }
 }

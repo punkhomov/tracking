@@ -42,21 +42,13 @@ fn main() -> Result<()> {
             ..Default::default()
         },
         Box::new(move |cc| {
-            #[cfg(windows)]
-            {
-                let mut fonts = egui::FontDefinitions::default();
-                if let Some(ubuntu) = fonts.font_data.get_mut("Ubuntu-Light") {
-                    // Use the same antialiased bitmap at each horizontal position.
-                    std::sync::Arc::make_mut(ubuntu).tweak.subpixel_binning = Some(false);
-                }
-                cc.egui_ctx.set_fonts(fonts);
-            }
             let store = DesktopStore {
                 database,
                 context: cc.egui_ctx.clone(),
                 cloud: None,
             };
             Ok(Box::new(DesktopApp(Tracker::new(
+                &cc.egui_ctx,
                 state,
                 local.cloud,
                 store,
@@ -167,10 +159,6 @@ impl Platform for DesktopStore {
     fn set_title(&self, title: &str) {
         self.context
             .send_viewport_cmd(egui::ViewportCommand::Title(title.to_owned()));
-    }
-
-    fn system_dark(&self) -> bool {
-        self.context.system_theme() == Some(egui::Theme::Dark)
     }
 }
 

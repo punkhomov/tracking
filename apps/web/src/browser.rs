@@ -205,17 +205,6 @@ impl Platform for BrowserStore {
             document.set_title(title);
         }
     }
-
-    fn system_dark(&self) -> bool {
-        web_sys::window()
-            .and_then(|window| {
-                window
-                    .match_media("(prefers-color-scheme: dark)")
-                    .ok()
-                    .flatten()
-            })
-            .is_some_and(|query| query.matches())
-    }
 }
 
 fn notifications_available() -> bool {
@@ -314,8 +303,9 @@ async fn start(document: &web_sys::Document) -> Result<()> {
         .start(
             canvas,
             eframe::WebOptions::default(),
-            Box::new(move |_| {
+            Box::new(move |cc| {
                 Ok(Box::new(WebApp(Tracker::new(
+                    &cc.egui_ctx,
                     snapshot.state,
                     snapshot.cloud,
                     store,
