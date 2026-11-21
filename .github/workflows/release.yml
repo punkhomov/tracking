@@ -1,4 +1,4 @@
-name: Windows release
+name: Tracking release
 
 on:
   push:
@@ -9,13 +9,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-release-${{ github.ref }}
+  group: tracking-release-${{ github.ref }}
 
 env:
   ARCHIVE: tracking-windows-x64.zip
+  APK: tracking-android.apk
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
     env:
       TARGET: x86_64-pc-windows-msvc
@@ -40,9 +41,68 @@ jobs:
           compression-level: 0
           overwrite: true
 
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0 ndk;28.2.13676358'
+          log-accepted-android-sdk-licenses: false
+      - name: Install Rust Android targets
+        run: |
+          rustup target add aarch64-linux-android x86_64-linux-android
+          cargo install --locked cargo-ndk --version 4.1.2
+      - name: Assemble Android APK
+        working-directory: apps/android
+        env:
+          TRACKING_ANDROID_VERSION_CODE: ${{ github.run_number }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [[ "$RELEASE_REF_TYPE" == "tag" ]]; then
+            export TRACKING_ANDROID_VERSION_NAME="${RELEASE_REF_NAME#v}"
+          fi
+          ./gradlew --no-daemon :app:assembleRelease
+      - name: Align, sign and verify Android APK
+        env:
+          TRACKING_ANDROID_KEYSTORE: ${{ secrets.TRACKING_ANDROID_KEYSTORE }}
+          TRACKING_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.TRACKING_ANDROID_KEYSTORE_PASSWORD }}
+        shell: bash
+        run: |
+          if [[ -z "$TRACKING_ANDROID_KEYSTORE" || -z "$TRACKING_ANDROID_KEYSTORE_PASSWORD" ]]; then
+            echo "::error::Set TRACKING_ANDROID_KEYSTORE and TRACKING_ANDROID_KEYSTORE_PASSWORD to sign the release APK."
+            exit 1
+          fi
+          umask 077
+          work=$(mktemp -d "$RUNNER_TEMP/tracking-apk.XXXXXX")
+          trap 'rm -rf "$work"' EXIT
+          base64 --decode <<< "$TRACKING_ANDROID_KEYSTORE" > "$work/tracking.p12"
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          "$tools/zipalign" -P 16 4 apps/android/app/build/outputs/apk/release/app-release-unsigned.apk "$work/aligned.apk"
+          "$tools/apksigner" sign --ks "$work/tracking.p12" --ks-type PKCS12 --ks-key-alias tracking \
+            --ks-pass env:TRACKING_ANDROID_KEYSTORE_PASSWORD --key-pass env:TRACKING_ANDROID_KEYSTORE_PASSWORD \
+            --out "$APK" "$work/aligned.apk"
+          "$tools/apksigner" verify --verbose --print-certs "$APK"
+          "$tools/zipalign" -c -P 16 4 "$APK"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tracking-android
+          path: ${{ env.APK }}
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+
   publish:
     if: github.event_name == 'push'
-    needs: build
+    needs: [windows, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -50,6 +110,9 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: tracking-windows-x64
+      - uses: actions/download-artifact@v8
+        with:
+          name: tracking-android
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -57,12 +120,14 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if release=$(gh release view "$RELEASE_TAG" --json isDraft,assets); then
-            if ! jq -e --arg name "$ARCHIVE" '.assets | any(.name == $name and .state == "uploaded")' <<< "$release" >/dev/null; then
-              gh release upload "$RELEASE_TAG" "$ARCHIVE" --clobber
-            fi
+            for asset in "$ARCHIVE" "$APK"; do
+              if ! jq -e --arg name "$asset" '.assets | any(.name == $name and .state == "uploaded")' <<< "$release" >/dev/null; then
+                gh release upload "$RELEASE_TAG" "$asset" --clobber
+              fi
+            done
             if jq -e '.isDraft' <<< "$release" >/dev/null; then
               gh release edit "$RELEASE_TAG" --draft=false --verify-tag
             fi
           else
-            gh release create "$RELEASE_TAG" "$ARCHIVE" --verify-tag --generate-notes
+            gh release create "$RELEASE_TAG" "$ARCHIVE" "$APK" --verify-tag --generate-notes
           fi

@@ -53,7 +53,8 @@ class TimerSmokeTest {
         compose.onNodeWithText("Добавить категорию").performClick()
         compose.onAllNodes(hasSetTextAction())[0].performTextInput("Тестовая категория")
         compose.onNodeWithText("Сохранить").performClick()
-        awaitText("Тестовая категория")
+        awaitText("В архив")
+        compose.onNodeWithText("Тестовая категория").assertIsDisplayed()
         compose.onNodeWithText("В архив").performScrollTo().performClick()
         awaitText("В архиве")
     }

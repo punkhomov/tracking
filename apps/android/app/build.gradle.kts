@@ -20,8 +20,8 @@ android {
         applicationId = "dev.punkhomov.tracking"
         minSdk = androidMinSdk
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = providers.environmentVariable("TRACKING_ANDROID_VERSION_CODE").orNull?.toInt() ?: 1
+        versionName = providers.environmentVariable("TRACKING_ANDROID_VERSION_NAME").orElse("0.1.0").get()
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk.abiFilters += androidAbis
     }

@@ -54,18 +54,25 @@ cd apps/android
 сборка **Android checks** проверяет восстановление таймера после остановки
 процесса и прикладывает APK как артефакт `tracking-android-debug`.
 
-## Релизы Windows
+## Релизы Windows и Android
 
-Отправьте тег `v*`, чтобы GitHub Actions собрал Windows x64 и опубликовал
-`tracking-windows-x64.zip` с `tracking-desktop.exe` в GitHub Releases.
+Отправьте тег `v*`, чтобы GitHub Actions опубликовал обе сборки в GitHub Releases.
+
+- `tracking-windows-x64.zip` содержит портативный `tracking-desktop.exe`.
+- `tracking-android.apk` содержит подписанную сборку для Android 8.0+ на ARM64 и x86-64.
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-Для пробной сборки запустите **Windows release** вручную в GitHub Actions.
-ZIP будет доступен в артефактах запуска.
+Для пробной сборки запустите **Tracking release** вручную в GitHub Actions
+и скачайте ZIP и APK из артефактов запуска.
+
+Для подписи APK задайте Actions secrets `TRACKING_ANDROID_KEYSTORE`
+с содержимым PKCS#12 в Base64 и `TRACKING_ANDROID_KEYSTORE_PASSWORD`
+с общим паролем хранилища и ключа `tracking`. Используйте тот же ключ
+в следующих релизах, чтобы Android мог обновлять установленное приложение.
 
 ## Импорт и экспорт
 
