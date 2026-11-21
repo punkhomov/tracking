@@ -5,6 +5,7 @@ members = [
     "crates/data",
     "crates/platform",
     "crates/ui",
+    "apps/android/native",
     "apps/desktop",
     "apps/web",
 ]

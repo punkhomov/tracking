@@ -38,6 +38,22 @@ trunk serve --locked
 отдельно для каждого origin. Эти данные пока не синхронизируются между
 сборками.
 
+**Android** с API 26 и выше на ARM64 или x86-64. Первый клиент поддерживает
+локальный таймер работы и перерыва, паузу, заметки и историю. Сборка требует
+JDK 17, Android SDK 36, Build Tools 35.0.0, NDK 28.2.13676358 и rustup.
+
+```sh
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install --locked cargo-ndk --version 4.1.2
+cd apps/android
+./gradlew :app:assembleDebug
+```
+
+На Windows используйте `gradlew.bat :app:assembleDebug`. APK лежит в
+`apps/android/app/build/outputs/apk/debug/app-debug.apk`. В GitHub Actions
+сборка **Android checks** проверяет восстановление таймера после остановки
+процесса и прикладывает APK как артефакт `tracking-android-debug`.
+
 ## Релизы Windows
 
 Отправьте тег `v*`, чтобы GitHub Actions собрал Windows x64 и опубликовал
@@ -77,9 +93,7 @@ Tracking принимает URL проекта и публичный ключ в
 - `crates/cloud` — Supabase Auth, Data API и объединение данных.
 - `crates/ui` и `crates/platform` — экран egui и контракт сохранения.
 - `apps/desktop` и `apps/web` — точки запуска eframe.
-
-Для будущего Android-клиента `tracking-core` можно подключить к Kotlin через
-UniFFI. Интерфейс и работу таймера в фоне реализует Android-клиент.
+- `apps/android` — приложение Jetpack Compose с адаптером UniFFI к Rust.
 
 ```sh
 cargo fmt --all -- --check

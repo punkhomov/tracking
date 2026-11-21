@@ -1,0 +1,4 @@
+[bindings.kotlin]
+package_name = "dev.punkhomov.tracking.nativecore"
+cdylib_name = "tracking_android"
+android = true
