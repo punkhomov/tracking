@@ -19,12 +19,12 @@ pub(super) struct Client {
 }
 
 impl Client {
-    pub(super) fn new() -> Result<Self> {
+    pub(super) fn new(service: Service) -> Result<Self> {
         Ok(Self {
             runtime: tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?,
-            service: Service::default(),
+            service,
             account: None,
             schedule: SyncSchedule::default(),
             dataset_conflict: None,
@@ -33,6 +33,18 @@ impl Client {
 
     fn execute(&mut self, request: CloudRequest) -> Result<CloudResponse> {
         self.runtime.block_on(self.service.execute(request))
+    }
+
+    fn set_account(&mut self, account: Option<Account>) {
+        self.account = account;
+        self.schedule = SyncSchedule::default();
+        self.dataset_conflict = None;
+    }
+
+    fn sign_out(&mut self) -> Result<()> {
+        self.execute(CloudRequest::SignOut)?;
+        self.set_account(None);
+        Ok(())
     }
 }
 
@@ -77,17 +89,34 @@ impl Tracker {
     }
 
     pub fn configure_sync(&self, url: String, key: String) -> Result<(), TrackerError> {
-        let connection = Connection::new(&url, &key)?;
+        let setup = Setup::Configured(Connection::new(&url, &key)?);
         let mut client = self.cloud_lock()?;
         let mut store = self.lock()?;
+        if store.state.cloud.setup == setup {
+            return Ok(());
+        }
+        client.sign_out()?;
         let mut cloud = store.state.cloud.clone();
-        cloud.setup = Setup::Configured(connection);
+        cloud.setup = setup;
         let local = store.tracker_state();
         store.save(local, cloud)?;
-        client.service = Service::default();
-        client.account = None;
-        client.schedule = SyncSchedule::default();
-        client.dataset_conflict = None;
+        Ok(())
+    }
+
+    pub fn restore_session(&self) -> Result<(), TrackerError> {
+        let mut client = self.cloud_lock()?;
+        if client.account.is_some() {
+            return Ok(());
+        }
+        let connection = match &self.lock()?.state.cloud.setup {
+            Setup::Configured(connection) => connection.clone(),
+            _ => return Ok(()),
+        };
+        if let CloudResponse::SignedIn(account) =
+            client.execute(CloudRequest::RestoreSession(connection))?
+        {
+            client.set_account(Some(account));
+        }
         Ok(())
     }
 
@@ -106,19 +135,13 @@ impl Tracker {
             email,
             code,
         })? {
-            client.account = Some(account);
-            client.schedule = SyncSchedule::default();
-            client.dataset_conflict = None;
+            client.set_account(Some(account));
         }
         Ok(())
     }
 
     pub fn sign_out(&self) -> Result<(), TrackerError> {
-        let mut client = self.cloud_lock()?;
-        client.execute(CloudRequest::SignOut)?;
-        client.account = None;
-        client.dataset_conflict = None;
-        client.schedule = SyncSchedule::default();
+        self.cloud_lock()?.sign_out()?;
         Ok(())
     }
 
@@ -232,8 +255,7 @@ impl Tracker {
                 return Ok(true);
             }
             CloudResponse::SessionExpired => {
-                client.account = None;
-                client.dataset_conflict = None;
+                client.set_account(None);
                 return Ok(true);
             }
             CloudResponse::RealtimeChanged(changed) => {

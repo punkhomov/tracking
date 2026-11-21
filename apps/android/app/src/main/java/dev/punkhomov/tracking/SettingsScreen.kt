@@ -94,6 +94,11 @@ private fun CloudSettings(cloud: CloudScreenState, model: TrackerViewModel) {
             model.cloudAction(codeSent = false) { it.signOut() }
         }) { Text("Выйти на этом устройстве") }
     } else {
+        if (cloud.retryRestore) {
+            OutlinedButton(enabled = !cloud.busy, onClick = model::restoreCloudSession) {
+                Text("Повторить восстановление входа")
+            }
+        }
         Field("Email", email) { email = it }
         if (cloud.codeSent) {
             Field("Код из письма", code) { code = it }

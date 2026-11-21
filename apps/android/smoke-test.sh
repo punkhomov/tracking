@@ -11,7 +11,7 @@ adb shell pm clear "$app"
 
 run_test() {
     local output
-    output=$(adb shell am instrument -w -e class "$app.TimerSmokeTest#$1" "$runner")
+    output=$(adb shell am instrument -w -e class "$app.${2:-TimerSmokeTest}#$1" "$runner")
     printf '%s\n' "$output"
     grep -Fq 'OK (1 test)' <<< "$output"
 }
@@ -24,6 +24,10 @@ for mode in yes no; do
 done
 adb shell cmd uimode night "$night_mode"
 trap - EXIT
+
+run_test persistSession SessionSmokeTest
+adb shell am force-stop "$app"
+run_test restoreAfterProcessRestartAndSignOut SessionSmokeTest
 
 run_test startSession
 adb shell am force-stop "$app"

@@ -1,6 +1,6 @@
 use std::{
     path::Path,
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use anyhow::Result;
@@ -10,6 +10,7 @@ use tracking_data::{Database, LocalState};
 
 mod cloud;
 mod features;
+mod session;
 
 uniffi::setup_scaffolding!();
 
@@ -18,6 +19,12 @@ uniffi::setup_scaffolding!();
 pub enum TrackerError {
     #[error("{0}")]
     Operation(#[from] anyhow::Error),
+}
+
+impl From<uniffi::UnexpectedUniFFICallbackError> for TrackerError {
+    fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        anyhow::anyhow!("Хранилище сессии Supabase недоступно.").into()
+    }
 }
 
 #[derive(Clone, Copy, uniffi::Enum)]
@@ -83,16 +90,19 @@ pub struct Tracker {
 impl Tracker {
     #[uniffi::constructor]
     pub fn open(path: String) -> Result<Self, TrackerError> {
-        let (database, state) = Database::open(Path::new(&path))?;
-        Ok(Self {
-            local: Mutex::new(Store {
-                database,
-                state,
-                timer_changed: false,
-                dataset_changed: false,
-            }),
-            cloud: Mutex::new(cloud::Client::new()?),
-        })
+        Ok(Self::open_profile(
+            &path,
+            tracking_cloud::Service::default(),
+        )?)
+    }
+
+    #[uniffi::constructor]
+    pub fn open_with_session_storage(
+        path: String,
+        vault: Arc<dyn session::SessionVault>,
+    ) -> Result<Self, TrackerError> {
+        let service = tracking_cloud::Service::with_session_storage(session::AndroidStorage(vault));
+        Ok(Self::open_profile(&path, service)?)
     }
 
     pub fn timer(&self) -> Result<TimerView, TrackerError> {
@@ -156,6 +166,19 @@ impl Tracker {
 }
 
 impl Tracker {
+    fn open_profile(path: &str, service: tracking_cloud::Service) -> Result<Self> {
+        let (database, state) = Database::open(Path::new(path))?;
+        Ok(Self {
+            local: Mutex::new(Store {
+                database,
+                state,
+                timer_changed: false,
+                dataset_changed: false,
+            }),
+            cloud: Mutex::new(cloud::Client::new(service)?),
+        })
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, Store>> {
         self.local
             .lock()

@@ -20,6 +20,7 @@ anyhow.workspace = true
 app-platform.workspace = true
 chrono.workspace = true
 chrono-tz = "0.10"
+serde_json.workspace = true
 thiserror = "2"
 tokio = { version = "1", features = ["rt"] }
 tracking-cloud.workspace = true

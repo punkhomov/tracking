@@ -37,6 +37,34 @@ impl SessionStorage for TestStorage {
 }
 
 #[test]
+fn restores_the_valid_access_token_without_network() -> Result<()> {
+    let connection = Connection::new("http://127.0.0.1:1", "sb_publishable_test")?;
+    let account = Account {
+        project: connection.url().into(),
+        user: Uuid::new_v4(),
+    };
+    let storage = TestStorage::default();
+    storage.save(&SavedSession {
+        account: account.clone(),
+        refresh_token: "synthetic-refresh".into(),
+        access: Some(SavedAccess {
+            token: "synthetic-access".into(),
+            expires_at: Utc::now().timestamp() + 3600,
+        }),
+    })?;
+    let mut service = Service::with_session_storage(storage);
+    let response = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(service.execute(CloudRequest::RestoreSession(connection)))?;
+    assert!(matches!(response, CloudResponse::SignedIn(found) if found == account));
+    let (_, session) = service.signed_in.unwrap();
+    assert_eq!(session.access_token, "synthetic-access");
+    assert_eq!(session.refresh_token, "synthetic-refresh");
+    Ok(())
+}
+
+#[test]
 fn remembers_and_rotates_the_session_across_restarts() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let connection = Connection::new(
@@ -145,6 +173,8 @@ fn remembers_and_rotates_the_session_across_restarts() -> Result<()> {
             let mut service = Service::with_session_storage(store.clone());
             assert!(matches!(service.execute(restore()).await?, CloudResponse::NoSavedSession));
             assert!(matches!(service.execute(verify()).await?, CloudResponse::SignedIn(found) if found == account));
+            let legacy = store.load()?.unwrap().without_cached_access();
+            store.save(&legacy)?;
             drop(service);
 
             let mut service = Service::with_session_storage(store.clone());

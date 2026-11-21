@@ -64,9 +64,13 @@ impl SessionStorage for Store {
     }
 
     fn save(&self, session: &SavedSession) -> Result<()> {
-        self.entry
-            .set_secret(&serde_json::to_vec(session)?)
-            .context("Не удалось сохранить сессию в диспетчере учётных данных Windows.")
+        let result = match self.entry.set_secret(&serde_json::to_vec(session)?) {
+            Err(Error::TooLong(_, _)) => self
+                .entry
+                .set_secret(&serde_json::to_vec(&session.without_cached_access())?),
+            result => result,
+        };
+        result.context("Не удалось сохранить сессию в диспетчере учётных данных Windows.")
     }
 
     fn clear(&self) -> Result<()> {
@@ -92,6 +96,7 @@ mod tests {
         let value = json!({
             "account": {"project": "https://example.test/", "user": Uuid::new_v4()},
             "refresh_token": "synthetic-credential",
+            "access": {"token": "synthetic-access", "expires_at": 1800000000},
         });
         let session = serde_json::from_value(value.clone())?;
         {
@@ -100,9 +105,15 @@ mod tests {
             store.save(&session)?;
         }
         let store = Store::open(&profile)?;
-        let saved = store.load();
+        let saved = serde_json::to_value(store.load()?)?;
+        let mut large = value.clone();
+        large["access"]["token"] = json!("a".repeat(4096));
+        store.save(&serde_json::from_value(large)?)?;
+        let fallback = serde_json::to_value(store.load()?)?;
         store.clear()?;
-        assert_eq!(serde_json::to_value(saved?)?, value);
+        assert_eq!(saved, value);
+        assert_eq!(fallback["refresh_token"], value["refresh_token"]);
+        assert!(fallback.get("access").is_none());
         assert!(store.load()?.is_none());
         Ok(())
     }

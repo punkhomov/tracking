@@ -30,6 +30,24 @@ pub struct Service {
 pub struct SavedSession {
     account: Account,
     refresh_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    access: Option<SavedAccess>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedAccess {
+    token: String,
+    expires_at: i64,
+}
+
+impl SavedSession {
+    pub fn without_cached_access(&self) -> Self {
+        Self {
+            account: self.account.clone(),
+            refresh_token: self.refresh_token.clone(),
+            access: None,
+        }
+    }
 }
 
 pub trait SessionStorage: Send {
@@ -57,6 +75,20 @@ impl Service {
             return Ok(CloudResponse::NoSavedSession);
         }
         let client = Supabase::new(connection)?;
+        if let Some(access) = saved
+            .access
+            .filter(|access| token_is_fresh(access.expires_at))
+        {
+            let session = Session {
+                access_token: access.token,
+                refresh_token: saved.refresh_token,
+                expires_at: access.expires_at,
+                user: User {
+                    id: saved.account.user,
+                },
+            };
+            return Ok(self.activate_session(client, session));
+        }
         match client.exchange_refresh_token(&saved.refresh_token).await {
             Ok(session) => {
                 ensure!(
@@ -75,10 +107,14 @@ impl Service {
 
     fn sign_in(&mut self, client: Supabase, session: Session) -> Result<CloudResponse> {
         client.save_session(&session, self.storage.as_deref())?;
+        Ok(self.activate_session(client, session))
+    }
+
+    fn activate_session(&mut self, client: Supabase, session: Session) -> CloudResponse {
         let account = client.account(&session);
         self.realtime = Default::default();
         self.signed_in = Some((client, session));
-        Ok(CloudResponse::SignedIn(account))
+        CloudResponse::SignedIn(account)
     }
 
     fn sign_out(&mut self) -> Result<()> {
@@ -195,6 +231,10 @@ struct Session {
     user: User,
 }
 
+fn token_is_fresh(expires_at: i64) -> bool {
+    expires_at > Utc::now().timestamp() + 60
+}
+
 #[derive(Deserialize)]
 struct User {
     id: Uuid,
@@ -282,7 +322,7 @@ impl Supabase {
         session: &mut Session,
         storage: Option<&dyn SessionStorage>,
     ) -> Result<()> {
-        if session.expires_at > Utc::now().timestamp() + 60 {
+        if token_is_fresh(session.expires_at) {
             return Ok(());
         }
         let next = self.exchange_refresh_token(&session.refresh_token).await?;
@@ -300,6 +340,10 @@ impl Supabase {
             storage.save(&SavedSession {
                 account: self.account(session),
                 refresh_token: session.refresh_token.clone(),
+                access: Some(SavedAccess {
+                    token: session.access_token.clone(),
+                    expires_at: session.expires_at,
+                }),
             })?;
         }
         Ok(())

@@ -34,7 +34,12 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 class TrackingApplication : Application() {
-    val tracker by lazy { Tracker.open(filesDir.resolve("tracking.sqlite3").absolutePath) }
+    val tracker by lazy {
+        Tracker.openWithSessionStorage(
+            filesDir.resolve("tracking.sqlite3").absolutePath,
+            AndroidSessionVault(noBackupFilesDir.resolve("tracking-supabase.session")),
+        )
+    }
 }
 
 data class TrackingState(
@@ -52,6 +57,7 @@ data class CloudScreenState(
     val status: SyncView? = null,
     val busy: Boolean = false,
     val codeSent: Boolean = false,
+    val retryRestore: Boolean = false,
     val error: String? = null,
 )
 
@@ -70,7 +76,7 @@ class TrackerViewModel(application: Application) : AndroidViewModel(application)
 
     init {
         reload()
-        cloudAction {}
+        restoreCloudSession()
     }
 
     fun reload() = change {}
@@ -136,9 +142,16 @@ class TrackerViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun cloudAction(codeSent: Boolean? = null, onSuccess: () -> Unit = {}, operation: (Tracker) -> Unit) {
+    fun restoreCloudSession() = cloudAction(restoring = true) { it.restoreSession() }
+
+    fun cloudAction(
+        codeSent: Boolean? = null,
+        onSuccess: () -> Unit = {},
+        restoring: Boolean = false,
+        operation: (Tracker) -> Unit,
+    ) {
         if (cloudState.value.busy) return
-        cloudState.update { it.copy(busy = true, error = null) }
+        cloudState.update { it.copy(busy = true, retryRestore = false, error = null) }
         viewModelScope.launch {
             try {
                 val refreshed = withContext(Dispatchers.IO) {
@@ -156,7 +169,14 @@ class TrackerViewModel(application: Application) : AndroidViewModel(application)
                 onSuccess()
                 refreshDataset()
             } catch (error: TrackerException) {
-                cloudState.update { it.copy(busy = false, error = error.message) }
+                val status = try {
+                    read { it.syncStatus() }
+                } catch (_: TrackerException) {
+                    null
+                }
+                cloudState.update {
+                    it.copy(status = status ?: it.status, busy = false, retryRestore = restoring, error = error.message)
+                }
             }
         }
     }
