@@ -16,6 +16,9 @@ pub struct ArchiveFile {
 pub trait Platform {
     fn save(&mut self, state: &TrackerState, cloud: &CloudState, complete: SaveComplete);
     fn cloud(&mut self, request: CloudRequest, complete: CloudComplete);
+    fn remembers_cloud_session(&self) -> bool {
+        false
+    }
     fn open_archive(&self, complete: Complete<Option<ArchiveFile>>);
     fn save_archive(&self, name: &str, contents: String, complete: Complete<bool>);
     fn notify(&self, title: &str, body: &str);

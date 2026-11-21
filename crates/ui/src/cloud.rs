@@ -21,6 +21,7 @@ pub(crate) struct CloudPanel {
     email: String,
     code: String,
     code_sent: bool,
+    retry_restore: bool,
     account: Option<Account>,
     pending: Option<Pending>,
     conflict: Option<usize>,
@@ -42,6 +43,8 @@ struct Pending {
 
 enum PendingKind {
     Account,
+    Restore,
+    Setup(Setup),
     Dataset {
         submitted: Box<Dataset>,
         manual: bool,
@@ -64,6 +67,7 @@ impl CloudPanel {
             email: String::new(),
             code: String::new(),
             code_sent: false,
+            retry_restore: false,
             account: None,
             pending: None,
             conflict: None,
@@ -95,6 +99,7 @@ impl CloudPanel {
     fn clear_login(&mut self) {
         self.account = None;
         self.code_sent = false;
+        self.retry_restore = false;
         self.code.clear();
         self.conflict = None;
         self.schedule = SyncSchedule::default();
@@ -167,7 +172,11 @@ impl CloudPanel {
 
         ui.label(connection.url());
         if let Some(account) = &self.account {
-            ui.label(format!("Вход выполнен как {}", self.email));
+            if self.email.is_empty() {
+                ui.label("Вход выполнен");
+            } else {
+                ui.label(format!("Вход выполнен как {}", self.email));
+            }
             if !self.state.timer.allows_account(account) {
                 ui.label("На устройстве есть действия с таймером другого аккаунта.");
                 return ui
@@ -259,6 +268,12 @@ impl CloudPanel {
                 self.status = None;
             }
         } else {
+            if self.retry_restore && ui.button("Повторить восстановление входа").clicked()
+            {
+                return Some(Action::Request(CloudRequest::RestoreSession(
+                    connection.clone(),
+                )));
+            }
             field(ui, "Email", &mut self.email, "name@example.com", 254);
             ui.horizontal_wrapped(|ui| {
                 if primary(ui, "Отправить код").clicked() {
@@ -331,6 +346,17 @@ impl Tracker {
     }
 
     fn set_cloud_setup(&mut self, setup: Setup, ctx: &Context) {
+        if self.platform.remembers_cloud_session()
+            && matches!(self.cloud.state.setup, Setup::Configured(_))
+            && self.cloud.state.setup != setup
+        {
+            self.start_cloud_request(CloudRequest::SignOut, PendingKind::Setup(setup), true, ctx);
+        } else {
+            self.persist_cloud_setup(setup, ctx);
+        }
+    }
+
+    fn persist_cloud_setup(&mut self, setup: Setup, ctx: &Context) {
         let mut cloud = self.cloud.state.clone();
         cloud.setup = setup;
         self.persist(
@@ -342,15 +368,17 @@ impl Tracker {
         );
     }
 
+    pub(crate) fn restore_cloud_session(&mut self, ctx: &Context) {
+        if self.platform.remembers_cloud_session()
+            && let Setup::Configured(connection) = &self.cloud.state.setup
+        {
+            self.request_cloud(CloudRequest::RestoreSession(connection.clone()), false, ctx);
+        }
+    }
+
     fn request_cloud(&mut self, request: CloudRequest, manual: bool, ctx: &Context) {
-        if self.pending.is_some() || self.io.is_some() || self.cloud.pending.is_some() {
-            return;
-        }
-        if manual {
-            self.cloud.error = None;
-            self.cloud.status = None;
-        }
         let kind = match &request {
+            CloudRequest::RestoreSession(_) => PendingKind::Restore,
             CloudRequest::Synchronize { dataset, .. } => PendingKind::Dataset {
                 submitted: dataset.clone(),
                 manual,
@@ -359,6 +387,24 @@ impl Tracker {
             CloudRequest::PollRealtime => PendingKind::Realtime,
             _ => PendingKind::Account,
         };
+        self.start_cloud_request(request, kind, manual, ctx);
+    }
+
+    fn start_cloud_request(
+        &mut self,
+        request: CloudRequest,
+        kind: PendingKind,
+        manual: bool,
+        ctx: &Context,
+    ) {
+        if self.pending.is_some() || self.io.is_some() || self.cloud.pending.is_some() {
+            return;
+        }
+        if manual {
+            self.cloud.error = None;
+            self.cloud.status = None;
+        }
+        self.cloud.retry_restore = false;
         let (send, result) = mpsc::channel();
         let ctx = ctx.clone();
         self.cloud.pending = Some(Pending { result, kind });
@@ -395,14 +441,22 @@ impl Tracker {
         match pending.result.try_recv() {
             Err(mpsc::TryRecvError::Empty) => self.cloud.pending = Some(pending),
             Err(mpsc::TryRecvError::Disconnected) => {
+                self.cloud.retry_restore = matches!(pending.kind, PendingKind::Restore);
                 self.cloud.error = Some("Запрос к Supabase не завершился.".into())
             }
-            Ok(Err(error)) => self.cloud.error = Some(error),
+            Ok(Err(error)) => {
+                self.cloud.retry_restore = matches!(pending.kind, PendingKind::Restore);
+                self.cloud.error = Some(error);
+            }
+            Ok(Ok(CloudResponse::NoSavedSession)) => {}
             Ok(Ok(CloudResponse::CodeSent)) => {
                 self.cloud.code_sent = true;
                 self.cloud.code.clear();
             }
             Ok(Ok(CloudResponse::SignedIn(account))) => {
+                if matches!(pending.kind, PendingKind::Restore) {
+                    self.cloud.email.clear();
+                }
                 self.cloud.clear_login();
                 self.cloud.account = Some(account);
                 ctx.request_repaint();
@@ -410,7 +464,11 @@ impl Tracker {
             Ok(Ok(CloudResponse::Conflict(count))) => self.cloud.conflict = Some(count),
             Ok(Ok(CloudResponse::SignedOut)) => {
                 self.cloud.clear_login();
-                self.cloud.status = Some("Выполнен выход на этом устройстве.");
+                if let PendingKind::Setup(setup) = pending.kind {
+                    self.persist_cloud_setup(setup, ctx);
+                } else {
+                    self.cloud.status = Some("Выполнен выход на этом устройстве.");
+                }
             }
             Ok(Ok(CloudResponse::SessionExpired)) => {
                 self.cloud.clear_login();

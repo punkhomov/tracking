@@ -1,9 +1,173 @@
-use std::{env, time::Duration};
+use std::{
+    env,
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpListener,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use app_platform::cloud::TimerSync;
 use tracking_core::{Command, TrackerState};
 
 use super::*;
+
+#[derive(Clone, Default)]
+struct TestStorage(Arc<Mutex<Option<Vec<u8>>>>);
+
+impl SessionStorage for TestStorage {
+    fn load(&self) -> Result<Option<SavedSession>> {
+        self.0
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    fn save(&self, session: &SavedSession) -> Result<()> {
+        *self.0.lock().unwrap() = Some(serde_json::to_vec(session)?);
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<()> {
+        *self.0.lock().unwrap() = None;
+        Ok(())
+    }
+}
+
+#[test]
+fn remembers_and_rotates_the_session_across_restarts() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let connection = Connection::new(
+        &format!("http://{}", listener.local_addr()?),
+        "sb_publishable_test",
+    )?;
+    let account = Account {
+        project: connection.url().into(),
+        user: Uuid::new_v4(),
+    };
+    let session = |token| {
+        json!({
+            "access_token": "synthetic-access",
+            "refresh_token": token,
+            "expires_at": 0,
+            "user": {"id": account.user},
+        })
+    };
+    let steps = [
+        (
+            "POST /auth/v1/verify ",
+            "123456",
+            "200 OK",
+            session("initial"),
+        ),
+        (
+            "POST /auth/v1/token?",
+            "initial",
+            "503 Unavailable",
+            json!({}),
+        ),
+        (
+            "POST /auth/v1/token?",
+            "initial",
+            "200 OK",
+            session("restored"),
+        ),
+        (
+            "POST /auth/v1/token?",
+            "restored",
+            "200 OK",
+            session("rotated"),
+        ),
+        (
+            "GET /rest/v1/tracking_timer?",
+            "",
+            "500 Unavailable",
+            json!({}),
+        ),
+        (
+            "POST /auth/v1/token?",
+            "rotated",
+            "400 Bad Request",
+            json!({"error_code": "refresh_token_not_found"}),
+        ),
+        (
+            "POST /auth/v1/verify ",
+            "123456",
+            "200 OK",
+            session("second-login"),
+        ),
+    ];
+    let server = std::thread::spawn(move || -> Result<()> {
+        for (route, expected, status, body) in steps {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut input = BufReader::new(&stream);
+            let mut line = String::new();
+            input.read_line(&mut line)?;
+            assert!(line.starts_with(route), "Unexpected request: {line}");
+            let mut length = 0;
+            loop {
+                line.clear();
+                ensure!(input.read_line(&mut line)? != 0, "Incomplete request");
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse()?;
+                }
+            }
+            let mut request_body = vec![0; length];
+            input.read_exact(&mut request_body)?;
+            assert!(std::str::from_utf8(&request_body)?.contains(expected));
+            let body = body.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+        }
+        Ok(())
+    });
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let store = TestStorage::default();
+            let verify = || CloudRequest::VerifyCode {
+                connection: connection.clone(),
+                email: "fixture@example.test".into(),
+                code: "123456".into(),
+            };
+            let restore = || CloudRequest::RestoreSession(connection.clone());
+            let mut service = Service::with_session_storage(store.clone());
+            assert!(matches!(service.execute(restore()).await?, CloudResponse::NoSavedSession));
+            assert!(matches!(service.execute(verify()).await?, CloudResponse::SignedIn(found) if found == account));
+            drop(service);
+
+            let mut service = Service::with_session_storage(store.clone());
+            let other = Connection::new("https://other.example.test", "sb_publishable_test")?;
+            assert!(matches!(service.execute(CloudRequest::RestoreSession(other)).await?, CloudResponse::NoSavedSession));
+            assert!(service.execute(restore()).await.is_err());
+            assert_eq!(store.load()?.unwrap().refresh_token, "initial");
+            assert!(matches!(service.execute(restore()).await?, CloudResponse::SignedIn(found) if found == account));
+            assert_eq!(store.load()?.unwrap().refresh_token, "restored");
+            assert!(service.execute(CloudRequest::SyncTimer { account: account.clone(), update: None }).await.is_err());
+            assert_eq!(store.load()?.unwrap().refresh_token, "rotated");
+            drop(service);
+
+            let mut service = Service::with_session_storage(store.clone());
+            assert!(matches!(service.execute(restore()).await?, CloudResponse::SessionExpired));
+            assert!(store.load()?.is_none());
+            assert!(matches!(service.execute(verify()).await?, CloudResponse::SignedIn(_)));
+            assert!(matches!(service.execute(CloudRequest::SignOut).await?, CloudResponse::SignedOut));
+            assert!(store.load()?.is_none());
+            Ok::<_, anyhow::Error>(())
+        })?;
+    server.join().expect("mock auth server panicked")
+}
 
 #[test]
 #[ignore = "requires local Supabase and a fresh synthetic account"]
@@ -29,7 +193,7 @@ async fn two_devices() -> Result<()> {
 
     let mut desktop_timer = TimerSync::default();
     let mut desktop_state = TrackerState::default();
-    let empty = first.sync_timer(&mut desktop, None).await?;
+    let empty = first.sync_timer(&mut desktop, None, None).await?;
     assert_eq!(empty.revision, 0);
     desktop_timer.apply(&mut desktop_state, account.clone(), empty, None);
     let now = Utc::now();
@@ -44,13 +208,13 @@ async fn two_devices() -> Result<()> {
     assert!(desktop_timer.record(&desktop_state, &started));
     let start = update(&desktop_timer, &account);
     let start_id = start.change.id;
-    let running = first.sync_timer(&mut desktop, Some(start)).await?;
+    let running = first.sync_timer(&mut desktop, Some(start), None).await?;
     assert_eq!(running.revision, 1);
     assert_eq!(running.change_id, Some(start_id));
     desktop_timer.apply(&mut started, account.clone(), running, Some(start_id));
     wait_for_change(&mut changes, &first, &desktop).await?;
 
-    let running = second.sync_timer(&mut phone, None).await?;
+    let running = second.sync_timer(&mut phone, None, None).await?;
     let session_id = running.timer.as_ref().unwrap().id;
     let mut phone_timer = TimerSync::default();
     let mut phone_state = TrackerState::default();
@@ -66,20 +230,20 @@ async fn two_devices() -> Result<()> {
     assert!(phone_timer.record(&phone_state, &online_finish));
     let accepted_id = update(&phone_timer, &account).change.id;
     let expected = second
-        .sync_timer(&mut phone, Some(update(&phone_timer, &account)))
+        .sync_timer(&mut phone, Some(update(&phone_timer, &account)), None)
         .await?;
     assert_eq!(expected.revision, 2);
     assert_eq!(expected.change_id, Some(accepted_id));
     assert!(expected.timer.is_none());
     wait_for_change(&mut changes, &first, &desktop).await?;
     let replay = second
-        .sync_timer(&mut phone, Some(update(&phone_timer, &account)))
+        .sync_timer(&mut phone, Some(update(&phone_timer, &account)), None)
         .await?;
     assert!(replay == expected);
 
     let stale = update(&desktop_timer, &account);
     let stale_id = stale.change.id;
-    let canonical = first.sync_timer(&mut desktop, Some(stale)).await?;
+    let canonical = first.sync_timer(&mut desktop, Some(stale), None).await?;
     assert!(canonical == expected);
     desktop_timer.apply(
         &mut offline_finish,

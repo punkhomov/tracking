@@ -11,7 +11,7 @@ use app_platform::cloud::{
 };
 use chrono::Utc;
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracking_core::{
     Dataset,
@@ -23,9 +23,73 @@ use uuid::Uuid;
 pub struct Service {
     signed_in: Option<(Supabase, Session)>,
     realtime: realtime::Subscription,
+    storage: Option<Box<dyn SessionStorage>>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SavedSession {
+    account: Account,
+    refresh_token: String,
+}
+
+pub trait SessionStorage: Send {
+    fn load(&self) -> Result<Option<SavedSession>>;
+    fn save(&self, session: &SavedSession) -> Result<()>;
+    fn clear(&self) -> Result<()>;
 }
 
 impl Service {
+    pub fn with_session_storage(storage: impl SessionStorage + 'static) -> Self {
+        Self {
+            storage: Some(Box::new(storage)),
+            ..Self::default()
+        }
+    }
+
+    async fn restore_session(&mut self, connection: &Connection) -> Result<CloudResponse> {
+        let Some(storage) = &self.storage else {
+            return Ok(CloudResponse::NoSavedSession);
+        };
+        let Some(saved) = storage.load()? else {
+            return Ok(CloudResponse::NoSavedSession);
+        };
+        if saved.account.project != connection.url() {
+            return Ok(CloudResponse::NoSavedSession);
+        }
+        let client = Supabase::new(connection)?;
+        match client.exchange_refresh_token(&saved.refresh_token).await {
+            Ok(session) => {
+                ensure!(
+                    client.account(&session) == saved.account,
+                    "Изменился аккаунт Supabase."
+                );
+                self.sign_in(client, session)
+            }
+            Err(error) if error.is::<AuthRequired>() => {
+                self.sign_out()?;
+                Ok(CloudResponse::SessionExpired)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn sign_in(&mut self, client: Supabase, session: Session) -> Result<CloudResponse> {
+        client.save_session(&session, self.storage.as_deref())?;
+        let account = client.account(&session);
+        self.realtime = Default::default();
+        self.signed_in = Some((client, session));
+        Ok(CloudResponse::SignedIn(account))
+    }
+
+    fn sign_out(&mut self) -> Result<()> {
+        if let Some(storage) = &self.storage {
+            storage.clear()?;
+        }
+        self.signed_in = None;
+        self.realtime = Default::default();
+        Ok(())
+    }
+
     pub async fn execute(&mut self, request: CloudRequest) -> Result<CloudResponse> {
         match request {
             CloudRequest::RequestCode { connection, email } => {
@@ -39,11 +103,9 @@ impl Service {
             } => {
                 let client = Supabase::new(&connection)?;
                 let session = client.verify_code(&email, &code).await?;
-                let account = client.account(&session);
-                self.realtime = Default::default();
-                self.signed_in = Some((client, session));
-                Ok(CloudResponse::SignedIn(account))
+                self.sign_in(client, session)
             }
+            CloudRequest::RestoreSession(connection) => self.restore_session(&connection).await,
             CloudRequest::Synchronize {
                 dataset,
                 baseline,
@@ -58,7 +120,13 @@ impl Service {
                     .filter(|point| point.account == account)
                     .map(|point| &point.dataset);
                 match client
-                    .synchronize(session, &dataset, baseline, preference)
+                    .synchronize(
+                        session,
+                        &dataset,
+                        baseline,
+                        preference,
+                        self.storage.as_deref(),
+                    )
                     .await
                 {
                     Ok(dataset) => Ok(CloudResponse::Synchronized(Box::new(SyncPoint {
@@ -66,8 +134,7 @@ impl Service {
                         dataset,
                     }))),
                     Err(error) if error.is::<AuthRequired>() => {
-                        self.signed_in = None;
-                        self.realtime = Default::default();
+                        self.sign_out()?;
                         Ok(CloudResponse::SessionExpired)
                     }
                     Err(error) => match error.downcast_ref::<Conflict>() {
@@ -84,15 +151,17 @@ impl Service {
                     return Ok(CloudResponse::SessionExpired);
                 }
                 let submitted = update.as_ref().map(|update| update.change.id);
-                match client.sync_timer(session, update).await {
+                match client
+                    .sync_timer(session, update, self.storage.as_deref())
+                    .await
+                {
                     Ok(snapshot) => Ok(CloudResponse::TimerSynchronized {
                         account,
                         snapshot,
                         submitted,
                     }),
                     Err(error) if error.is::<AuthRequired>() => {
-                        self.signed_in = None;
-                        self.realtime = Default::default();
+                        self.sign_out()?;
                         Ok(CloudResponse::SessionExpired)
                     }
                     Err(error) => Err(error),
@@ -105,8 +174,7 @@ impl Service {
                 Ok(CloudResponse::RealtimeChanged(changed))
             }
             CloudRequest::SignOut => {
-                self.signed_in = None;
-                self.realtime = Default::default();
+                self.sign_out()?;
                 Ok(CloudResponse::SignedOut)
             }
         }
@@ -209,23 +277,64 @@ impl Supabase {
         .await?)
     }
 
-    async fn refresh(&self, session: &mut Session) -> Result<()> {
+    async fn refresh(
+        &self,
+        session: &mut Session,
+        storage: Option<&dyn SessionStorage>,
+    ) -> Result<()> {
         if session.expires_at > Utc::now().timestamp() + 60 {
             return Ok(());
         }
-        let response = self
-            .request(reqwest::Method::POST, "auth/v1/token")
-            .query(&[("grant_type", "refresh_token")])
-            .json(&json!({ "refresh_token": session.refresh_token }))
-            .send()
-            .await;
-        let next: Session = checked(response).await?.json().await?;
+        let next = self.exchange_refresh_token(&session.refresh_token).await?;
         ensure!(
             next.user.id == session.user.id,
             "Изменился аккаунт Supabase."
         );
+        self.save_session(&next, storage)?;
         *session = next;
         Ok(())
+    }
+
+    fn save_session(&self, session: &Session, storage: Option<&dyn SessionStorage>) -> Result<()> {
+        if let Some(storage) = storage {
+            storage.save(&SavedSession {
+                account: self.account(session),
+                refresh_token: session.refresh_token.clone(),
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn exchange_refresh_token(&self, refresh_token: &str) -> Result<Session> {
+        let response = self
+            .request(reqwest::Method::POST, "auth/v1/token")
+            .query(&[("grant_type", "refresh_token")])
+            .json(&json!({ "refresh_token": refresh_token }))
+            .send()
+            .await
+            .context("Не удалось связаться с Supabase для восстановления входа.")?;
+        if response.status().is_success() {
+            return response
+                .json()
+                .await
+                .map_err(|_| anyhow::anyhow!("Неверный ответ Supabase при обновлении сессии."));
+        }
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap_or_default();
+        if matches!(
+            body["error_code"].as_str(),
+            Some(
+                "refresh_token_not_found"
+                    | "refresh_token_already_used"
+                    | "session_not_found"
+                    | "session_expired"
+                    | "user_not_found"
+                    | "user_banned"
+            )
+        ) {
+            return Err(AuthRequired.into());
+        }
+        bail!("Не удалось обновить сессию Supabase (HTTP {status}).")
     }
 
     async fn synchronize(
@@ -234,8 +343,9 @@ impl Supabase {
         local: &Dataset,
         baseline: Option<&Dataset>,
         preference: Preference,
+        storage: Option<&dyn SessionStorage>,
     ) -> Result<Dataset> {
-        self.refresh(session).await?;
+        self.refresh(session, storage).await?;
         let empty = Dataset::default();
         let base = baseline.unwrap_or(&empty);
         for _ in 0..3 {
@@ -261,8 +371,9 @@ impl Supabase {
         &self,
         session: &mut Session,
         update: Option<TimerUpdate>,
+        storage: Option<&dyn SessionStorage>,
     ) -> Result<TimerSnapshot> {
-        self.refresh(session).await?;
+        self.refresh(session, storage).await?;
         let request = if let Some(update) = &update {
             let change = &update.change;
             self.request(reqwest::Method::POST, "rest/v1/rpc/tracking_apply_timer")

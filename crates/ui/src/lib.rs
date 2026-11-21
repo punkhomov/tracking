@@ -72,7 +72,7 @@ impl Tracker {
             note.clone_from(&timer.note);
             category = timer.category;
         }
-        Self {
+        let mut tracker = Self {
             settings: state.dataset.settings.clone(),
             state,
             platform: Box::new(platform),
@@ -92,7 +92,9 @@ impl Tracker {
             revision: 0,
             daily: DailyCache::default(),
             report: ReportCache::default(),
-        }
+        };
+        tracker.restore_cloud_session(ctx);
+        tracker
     }
 
     pub fn ui(&mut self, ui: &mut Ui, now: DateTime<Utc>) {

@@ -15,6 +15,8 @@ use tracking_data::{Database, LocalState};
 
 #[cfg(target_os = "windows")]
 mod windows_notifications;
+#[cfg(target_os = "windows")]
+mod windows_session;
 
 const ICON_PNG: &[u8] = include_bytes!("../../../assets/tracking.png");
 
@@ -44,6 +46,8 @@ fn main() -> Result<()> {
         Box::new(move |cc| {
             let store = DesktopStore {
                 database,
+                #[cfg(windows)]
+                profile: path,
                 context: cc.egui_ctx.clone(),
                 cloud: None,
             };
@@ -77,8 +81,33 @@ impl eframe::App for DesktopApp {
 
 struct DesktopStore {
     database: Database,
+    #[cfg(windows)]
+    profile: PathBuf,
     context: egui::Context,
     cloud: Option<mpsc::Sender<(CloudRequest, CloudComplete)>>,
+}
+
+impl DesktopStore {
+    fn cloud_worker(&self) -> Result<mpsc::Sender<(CloudRequest, CloudComplete)>> {
+        #[cfg(windows)]
+        let mut service = tracking_cloud::Service::with_session_storage(
+            windows_session::Store::open(&self.profile)?,
+        );
+        #[cfg(not(windows))]
+        let mut service = tracking_cloud::Service::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let (send, receive) = mpsc::channel::<(CloudRequest, CloudComplete)>();
+        std::thread::Builder::new()
+            .name("tracking-cloud".into())
+            .spawn(move || {
+                for (request, complete) in receive {
+                    complete(runtime.block_on(service.execute(request)));
+                }
+            })?;
+        Ok(send)
+    }
 }
 
 impl Platform for DesktopStore {
@@ -94,7 +123,7 @@ impl Platform for DesktopStore {
     fn cloud(&mut self, request: CloudRequest, complete: CloudComplete) {
         let sender = match &self.cloud {
             Some(sender) => sender,
-            None => match cloud_worker() {
+            None => match self.cloud_worker() {
                 Ok(sender) => self.cloud.insert(sender),
                 Err(error) => return complete(Err(error)),
             },
@@ -103,6 +132,10 @@ impl Platform for DesktopStore {
             self.cloud = None;
             complete(Err(anyhow!("Не удалось запустить запрос к Supabase.")));
         }
+    }
+
+    fn remembers_cloud_session(&self) -> bool {
+        cfg!(windows)
     }
 
     fn open_archive(&self, complete: Complete<Option<ArchiveFile>>) {
@@ -160,22 +193,6 @@ impl Platform for DesktopStore {
         self.context
             .send_viewport_cmd(egui::ViewportCommand::Title(title.to_owned()));
     }
-}
-
-fn cloud_worker() -> Result<mpsc::Sender<(CloudRequest, CloudComplete)>> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let (send, receive) = mpsc::channel::<(CloudRequest, CloudComplete)>();
-    std::thread::Builder::new()
-        .name("tracking-cloud".into())
-        .spawn(move || {
-            let mut service = tracking_cloud::Service::default();
-            for (request, complete) in receive {
-                complete(runtime.block_on(service.execute(request)));
-            }
-        })?;
-    Ok(send)
 }
 
 fn notify(title: &str, body: &str) -> Result<()> {

@@ -236,6 +236,7 @@ pub enum CloudRequest {
         email: String,
         code: String,
     },
+    RestoreSession(Connection),
     Synchronize {
         dataset: Box<Dataset>,
         baseline: Option<Box<SyncPoint>>,
@@ -252,6 +253,7 @@ pub enum CloudRequest {
 pub enum CloudResponse {
     CodeSent,
     SignedIn(Account),
+    NoSavedSession,
     Synchronized(Box<SyncPoint>),
     Conflict(usize),
     TimerSynchronized {
