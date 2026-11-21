@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local, NaiveDate, Utc};
-use egui::{ComboBox, RichText, ScrollArea, Ui, vec2};
+use egui::{Align, ComboBox, Layout, RichText, ScrollArea, TextStyle, Ui, vec2};
 use tracking_core::{
     ArchiveScope, Command, Dataset, Kind, Period, export_archive,
     reports::{Span, span_dates},
@@ -7,12 +7,16 @@ use tracking_core::{
 use uuid::Uuid;
 
 use crate::{
-    IoEvent, Tracker, category_name, completion, date_format, default_color, duration,
+    IoEvent, Tracker, category_name, completion,
+    components::{action_row, actions_menu, card, color_dot, primary, primary_add},
+    date_format, default_color, duration,
     editors::{Editor, weekday_label, weekday_order},
     kind_name,
-    theme::{card, parse_color, primary},
+    theme::{CONTROL_HEIGHT, parse_color},
     time_format,
 };
+
+const HISTORY_ROW_HEIGHT: f32 = 60.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum Screen {
@@ -110,7 +114,7 @@ impl Tracker {
         let today = now.with_timezone(&Local).date_naive();
         let mut action = None;
         card(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            action_row(ui, |ui| {
                 ui.heading("Сегодняшние сессии");
                 if ui.button("Добавить сессию").clicked() {
                     self.open_editor(Editor::new_period(None, &self.state.dataset, now));
@@ -143,9 +147,9 @@ impl Tracker {
         let today = now.with_timezone(&Local).date_naive();
         let mut action = None;
         card(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            action_row(ui, |ui| {
                 ui.heading("Вся история");
-                if primary(ui, "Добавить сессию").clicked() {
+                if primary_add(ui, "Добавить сессию").clicked() {
                     self.open_editor(Editor::new_period(None, &self.state.dataset, now));
                 }
                 if ui
@@ -169,7 +173,7 @@ impl Tracker {
                         .desired_width(ui.available_width()),
                 )
                 .changed();
-            ui.horizontal_wrapped(|ui| {
+            action_row(ui, |ui| {
                 ComboBox::from_id_salt("history-date")
                     .selected_text(span_label(self.history.span))
                     .show_ui(ui, |ui| {
@@ -205,35 +209,43 @@ impl Tracker {
                 .id_salt("history-rows")
                 .max_height(510.0)
                 .auto_shrink([false, true])
-                .show_rows(ui, 58.0, self.history.rows.len(), |ui, range| {
-                    for index in range {
-                        ui.allocate_ui(vec2(ui.available_width(), 58.0), |ui| {
-                            match self.history.rows[index] {
-                                HistoryRow::Day(day) => {
-                                    ui.add_space(8.0);
-                                    ui.label(
-                                        RichText::new(
-                                            day.format(date_format(&self.state.dataset.settings))
+                .show_rows(
+                    ui,
+                    HISTORY_ROW_HEIGHT,
+                    self.history.rows.len(),
+                    |ui, range| {
+                        for index in range {
+                            ui.allocate_ui(vec2(ui.available_width(), HISTORY_ROW_HEIGHT), |ui| {
+                                ui.set_min_height(HISTORY_ROW_HEIGHT);
+                                match self.history.rows[index] {
+                                    HistoryRow::Day(day) => {
+                                        ui.add_space(8.0);
+                                        ui.label(
+                                            RichText::new(
+                                                day.format(date_format(
+                                                    &self.state.dataset.settings,
+                                                ))
                                                 .to_string(),
-                                        )
-                                        .strong(),
-                                    );
-                                    ui.separator();
-                                }
-                                HistoryRow::Session(id) => {
-                                    if let Some(clicked) = session_row(
-                                        ui,
-                                        &self.state.dataset,
-                                        id,
-                                        &self.state.dataset.periods[&id],
-                                    ) {
-                                        action = Some(clicked);
+                                            )
+                                            .strong(),
+                                        );
+                                        ui.separator();
+                                    }
+                                    HistoryRow::Session(id) => {
+                                        if let Some(clicked) = session_row(
+                                            ui,
+                                            &self.state.dataset,
+                                            id,
+                                            &self.state.dataset.periods[&id],
+                                        ) {
+                                            action = Some(clicked);
+                                        }
                                     }
                                 }
-                            }
-                        });
-                    }
-                });
+                            });
+                        }
+                    },
+                );
         });
         self.apply_row(action, now);
     }
@@ -258,7 +270,7 @@ impl Tracker {
         card(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.heading("Категории");
-                if primary(ui, "Добавить категорию").clicked() {
+                if primary_add(ui, "Добавить категорию").clicked() {
                     edit = Some(None);
                 }
             });
@@ -285,7 +297,7 @@ impl Tracker {
                 for (&id, category) in categories {
                     ui.push_id(id, |ui| {
                         ui.horizontal_wrapped(|ui| {
-                            ui.colored_label(default_color(Some(category)), "●");
+                            color_dot(ui, default_color(Some(category)));
                             ui.strong(&category.name);
                             if ui.button("Изменить").clicked() {
                                 edit = Some(Some(id));
@@ -319,7 +331,7 @@ impl Tracker {
         card(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.heading("Зоны таймлайна");
-                if primary(ui, "Добавить зону").clicked() {
+                if primary_add(ui, "Добавить зону").clicked() {
                     editor = Some(Editor::new_zone(None, None, dataset, today));
                 }
             });
@@ -345,7 +357,7 @@ impl Tracker {
                             ui.weak("↳");
                         }
                         if let Some(color) = zone.color.as_deref().and_then(parse_color) {
-                            ui.colored_label(color, "●");
+                            color_dot(ui, color);
                         }
                         ui.strong(&zone.name);
                         let format = time_format(&dataset.settings);
@@ -552,32 +564,11 @@ impl Tracker {
 fn session_row(ui: &mut Ui, dataset: &Dataset, id: Uuid, period: &Period) -> Option<RowAction> {
     ui.push_id(id, |ui| {
         let mut action = None;
-        ui.horizontal_wrapped(|ui| {
-            let color = default_color(period.category.and_then(|id| dataset.categories.get(&id)));
-            ui.colored_label(color, "●");
-            let name = if period.note.is_empty() {
-                kind_name(period.kind)
-            } else {
-                &period.note
-            };
-            let label_width = (ui.available_width() - 155.0).max(110.0);
-            ui.allocate_ui(vec2(label_width, 17.0), |ui| {
-                ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
-            });
-            ui.weak(duration(period.duration_millis()));
-            ui.menu_button("⋯", |ui| {
-                if ui.button("Редактировать").clicked() {
-                    action = Some(RowAction::Edit(id));
-                    ui.close();
-                }
-                if ui.button("Удалить").clicked() {
-                    action = Some(RowAction::Delete(id));
-                    ui.close();
-                }
-            })
-            .response
-            .on_hover_text("Действия с сессией");
-        });
+        let name = if period.note.is_empty() {
+            kind_name(period.kind)
+        } else {
+            &period.note
+        };
         let format = time_format(&dataset.settings);
         let start = period.start.with_timezone(&Local);
         let end = period.end.with_timezone(&Local);
@@ -590,7 +581,35 @@ fn session_row(ui: &mut Ui, dataset: &Dataset, id: Uuid, period: &Period) -> Opt
         if period.category.is_some() {
             subtitle.push_str(&format!("  ·  {}", category_name(dataset, period.category)));
         }
-        ui.add(egui::Label::new(RichText::new(subtitle).weak()).truncate());
+        let width = ui.available_width();
+        let trailing = Layout::right_to_left(Align::Center);
+        let leading = Layout::left_to_right(Align::Center);
+        ui.allocate_ui_with_layout(vec2(width, CONTROL_HEIGHT), trailing, |ui| {
+            actions_menu(ui, |ui| {
+                if ui.button("Редактировать").clicked() {
+                    action = Some(RowAction::Edit(id));
+                    ui.close();
+                }
+                if ui.button("Удалить").clicked() {
+                    action = Some(RowAction::Delete(id));
+                    ui.close();
+                }
+            });
+            ui.with_layout(leading, |ui| {
+                let category = period.category.and_then(|id| dataset.categories.get(&id));
+                color_dot(ui, default_color(category));
+                ui.add(egui::Label::new(RichText::new(name).strong()).truncate())
+                    .on_hover_text(name);
+            });
+        });
+        let subtitle_height = ui.text_style_height(&TextStyle::Body);
+        ui.allocate_ui_with_layout(vec2(width, subtitle_height), trailing, |ui| {
+            ui.weak(duration(period.duration_millis()));
+            ui.with_layout(leading, |ui| {
+                ui.add(egui::Label::new(RichText::new(&subtitle).weak()).truncate())
+                    .on_hover_text(subtitle);
+            });
+        });
         action
     })
     .inner

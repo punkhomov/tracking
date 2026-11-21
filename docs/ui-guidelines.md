@@ -12,4 +12,17 @@
 - На desktop и web создавайте две палитры на основе `Visuals::light()` и `Visuals::dark()`. Устанавливайте их через `Context::set_style_of` до первого кадра и выбирайте сохранённый режим через `Context::set_theme`. Так виджеты, всплывающие окна и атлас шрифтов получают настройки одной темы. Стили отдельных `Ui` подходят для локальных отличий виджетов. [egui Context](https://docs.rs/egui/0.36.2/egui/struct.Context.html#method.set_style_of)
 - На Android применяйте выбранную тему к `MaterialTheme` и системным панелям через `SystemBarStyle`. У светлого фона тёмные системные иконки, у тёмного фона светлые. Проверяйте оба случая с противоположной темой системы. [Android Edge-to-edge](https://developer.android.com/develop/ui/compose/system/setup-e2e)
 
+## Компоненты и проверка компоновки
+
+- Палитра и типографика desktop/web задаются в `crates/ui/src/theme.rs`. Страницы собираются из общих компонентов в `crates/ui/src/components.rs`. Компоненты получают данные от экрана, а действия экрана выполняются через команды ядра. [Подход Craft к общему UI](https://github.com/storytold/craft-libs/issues/617)
+- Скругления карточек и контролов выводятся из одного базового радиуса. Активная вкладка отмечается линией. Для выбора одного из двух режимов используйте сегментированный переключатель egui или `SingleChoiceSegmentedButtonRow` в Compose. [Темизация shadcn](https://ui.shadcn.com/docs/theming) · [Вкладки shadcn](https://ui.shadcn.com/docs/components/tabs) · [Сегменты Compose](https://developer.android.com/develop/ui/compose/components/segmented-button)
+- Для desktop и web используйте векторные иконки Lucide из `crates/ui/src/icons.rs`. У действия из одной иконки должна быть доступная подпись и подсказка. [Lucide](https://lucide.dev/guide/packages/lucide-static)
+- `cargo test --locked -p app-ui` проверяет размеры и пересечения элементов, контраст и действия с клавиатуры через `egui_kittest` и AccessKit. Тестам достаточно синтетических данных и фиксированных часов. [Доступность Craft](https://github.com/storytold/craft-contrib/blob/5b1a2b1982fe7c774739d06d4a3818033cf4884c/standards/accessibility.md)
+- Для проверки отрисовки на Linux соберите нативное приложение и запустите его в Xvfb. Скрипт использует `python3`, `xvfb-run`, `xdotool` и `scrot`. Он снимает таймер и историю в обеих темах и сохраняет PNG в `target/ui-screenshots/`. Для браузера собирайте WASM через Trunk и проверяйте отрисовку canvas на тех же размерах viewport. [Снимки DesignCraft](https://github.com/storytold/designcraft/blob/4000591c6681d01386b9576f9a050b8460e6f2e3/docs/control-protocol.md)
+
+```sh
+cargo build --locked -p app-desktop
+xvfb-run -a -s '-screen 0 1440x1100x24' python3 scripts/capture-ui-linux.py
+```
+
 Рекомендации по качеству адаптированы из стандартов Craft. [Доступность](https://github.com/storytold/craft-contrib/blob/5b1a2b1982fe7c774739d06d4a3818033cf4884c/standards/accessibility.md) · [Тестирование](https://github.com/storytold/craft-contrib/blob/5b1a2b1982fe7c774739d06d4a3818033cf4884c/standards/testing.md)

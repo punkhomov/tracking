@@ -6,9 +6,11 @@ use tracking_core::{
 use uuid::Uuid;
 
 use crate::{
-    Tracker, category_picker, default_color, kind_name,
+    Tracker, category_picker,
+    components::{action_row, primary},
+    default_color, kind_name,
     pages::archive_label,
-    theme::{color_string, parse_color, primary},
+    theme::{color_string, parse_color},
 };
 
 pub(crate) enum Editor {
@@ -273,10 +275,10 @@ impl Tracker {
         let mut submit = false;
         let label = editor.submit_label();
         let response = Modal::new(Id::new("tracking-editor")).show(ctx, |ui| {
-            ui.set_width((ctx.content_rect().width() - 58.0).clamp(245.0, 490.0));
+            ui.set_width((ctx.content_rect().width() - 58.0).clamp(0.0, 490.0));
             ui.heading(editor.title());
             ScrollArea::vertical()
-                .max_height((ctx.content_rect().height() - 145.0).max(130.0))
+                .max_height((ctx.content_rect().height() - 145.0).max(32.0))
                 .show(ui, |ui| {
                     ui.add_enabled_ui(!busy, |ui| editor.body(ui, &self.state.dataset));
                 });
@@ -285,7 +287,7 @@ impl Tracker {
             }
             ui.separator();
             ui.add_enabled_ui(!busy, |ui| {
-                ui.horizontal_wrapped(|ui| {
+                action_row(ui, |ui| {
                     submit = primary(ui, label).clicked();
                     cancel = ui.button("Отмена").clicked();
                 });

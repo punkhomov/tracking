@@ -21,7 +21,7 @@ android {
         minSdk = androidMinSdk
         targetSdk = 36
         versionCode = providers.environmentVariable("TRACKING_ANDROID_VERSION_CODE").orNull?.toInt() ?: 1
-        versionName = providers.environmentVariable("TRACKING_ANDROID_VERSION_NAME").orElse("0.1.0").get()
+        versionName = providers.environmentVariable("TRACKING_ANDROID_VERSION_NAME").orElse("0.2.0").get()
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk.abiFilters += androidAbis
     }

@@ -1,14 +1,18 @@
 mod charts;
 mod cloud;
+mod components;
 mod editors;
+mod icons;
 mod pages;
 mod theme;
+#[cfg(test)]
+mod ui_tests;
 
 use std::{sync::mpsc, time::Duration};
 
 use app_platform::{ArchiveFile, Complete, Platform, cloud::CloudState};
 use chrono::{DateTime, Local, Utc};
-use egui::{Align, ComboBox, Context, Frame, Layout, Margin, RichText, Ui};
+use egui::{ComboBox, Context, Label, RichText, Ui};
 use tracking_core::{
     ArchiveScope, Category, Command, Dataset, Kind, Reminder, Settings, TrackerState,
 };
@@ -17,9 +21,10 @@ use uuid::Uuid;
 use self::{
     charts::{DailyCache, ReportCache},
     cloud::CloudPanel,
+    components::{action_row, card, navigation, page, primary, segmented},
     editors::Editor,
     pages::{HistoryFilters, Screen},
-    theme::{accent, card, primary},
+    theme::accent,
 };
 
 pub struct Tracker {
@@ -102,49 +107,25 @@ impl Tracker {
         self.poll_io();
         self.poll_cloud(now, ui.ctx());
         self.update_timer(now, ui.ctx());
-        egui::CentralPanel::default()
-            .frame(
-                Frame::new()
-                    .fill(ui.visuals().extreme_bg_color)
-                    .inner_margin(Margin::same(16)),
-            )
-            .show(ui, |ui| {
-                let available = ui.available_width();
-                let width = available.min(920.0);
-                ui.horizontal_top(|ui| {
-                    ui.add_space((available - width) / 2.0);
-                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                        ui.set_width(width);
-                        self.header(ui);
-                        let busy = self.pending.is_some() || self.io.is_some();
-                        ui.add_enabled_ui(!busy, |ui| {
-                            egui::ScrollArea::vertical()
-                                .id_salt(self.screen)
-                                .show(ui, |ui| {
-                                    self.screen(ui, now);
-                                });
-                        });
-                    });
-                });
+        page(ui, |ui| {
+            self.header(ui);
+            let busy = self.pending.is_some() || self.io.is_some();
+            ui.add_enabled_ui(!busy, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt(self.screen)
+                    .show(ui, |ui| self.screen(ui, now));
             });
+        });
         self.show_editor(ui.ctx(), now);
     }
 
     fn header(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Tracking").size(29.0).strong());
-        ui.horizontal_wrapped(|ui| {
-            for screen in Screen::ALL {
-                if ui
-                    .selectable_label(self.screen == screen, screen.title())
-                    .clicked()
-                    && self.screen != screen
-                {
-                    self.screen = screen;
-                    self.error = None;
-                    self.status = None;
-                }
-            }
-        });
+        ui.heading(RichText::new("Tracking").size(29.0).strong());
+        if let Some(screen) = navigation(ui, self.screen) {
+            self.screen = screen;
+            self.error = None;
+            self.status = None;
+        }
         if let Some(reminder) = self.last_reminder.filter(|reminder| {
             self.state
                 .timer
@@ -176,8 +157,8 @@ impl Tracker {
     fn screen(&mut self, ui: &mut Ui, now: DateTime<Utc>) {
         match self.screen {
             Screen::Today => {
-                self.offer_cloud(ui);
                 card(ui, |ui| self.timer(ui, now));
+                self.offer_cloud(ui);
                 self.timeline(ui, now);
                 self.today_history(ui, now);
             }
@@ -196,69 +177,64 @@ impl Tracker {
         let elapsed = timer.map_or(0, |timer| timer.elapsed_seconds(now));
         let paused = timer.is_some_and(|timer| timer.is_paused());
         let running = timer.is_some();
+        let editing = kind == Kind::Work && (!running || paused);
+        let has_details =
+            timer.is_some_and(|timer| !timer.note.is_empty() || timer.category.is_some());
         let mut command = None;
-        ui.horizontal_wrapped(|ui| {
-            for option in [Kind::Work, Kind::Break] {
-                if ui
-                    .add_enabled(
-                        !running,
-                        egui::Button::selectable(kind == option, kind_name(option)),
-                    )
-                    .clicked()
-                    && kind != option
-                {
-                    command = Some(Command::SelectKind(option));
-                }
-            }
-            ui.weak(if paused {
-                "На паузе"
-            } else if running {
-                "В процессе"
-            } else {
-                "Готов к запуску"
-            });
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(clock(elapsed)).size(58.0).strong());
-            ui.weak(format!("Цель {} мин", target / 60));
-        });
-        ui.add(
-            egui::ProgressBar::new((elapsed as f32 / target as f32).clamp(0.0, 1.0))
-                .fill(accent(ui))
-                .desired_height(6.0),
-        );
-
-        if kind == Kind::Work && (!running || paused) {
+        let mut overview = |ui: &mut Ui| {
             ui.horizontal_wrapped(|ui| {
-                category_picker(
-                    ui,
-                    "timer-category",
-                    &self.state.dataset,
-                    &mut self.category,
-                );
-                if ui.button("Новая категория").clicked() {
-                    self.open_editor(Editor::new_category(None, &self.state.dataset, true));
+                let mut selected_kind = kind;
+                ui.add_enabled_ui(!running, |ui| {
+                    segmented(
+                        ui,
+                        &mut selected_kind,
+                        [Kind::Work, Kind::Break].map(|option| (option, kind_name(option))),
+                    );
+                });
+                if selected_kind != kind {
+                    command = Some(Command::SelectKind(selected_kind));
                 }
+                let status = if paused {
+                    "На паузе"
+                } else if running {
+                    "В процессе"
+                } else {
+                    "Готов к запуску"
+                };
+                ui.add(Label::new(RichText::new(status).weak()).extend());
             });
-            let label = ui.label("Заметка");
+            let goal = ui
+                .horizontal_wrapped(|ui| {
+                    let clock_size = if ui.available_width() >= 330.0 {
+                        56.0
+                    } else {
+                        46.0
+                    };
+                    ui.add(Label::new(RichText::new(clock(elapsed)).size(clock_size)).truncate());
+                    ui.add(
+                        Label::new(RichText::new(format!("Цель {} мин", target / 60)).weak())
+                            .extend(),
+                    )
+                })
+                .inner;
             ui.add(
-                egui::TextEdit::multiline(&mut self.note)
-                    .hint_text("Что будете делать?")
-                    .desired_rows(2)
-                    .desired_width(ui.available_width()),
+                egui::ProgressBar::new((elapsed as f32 / target as f32).clamp(0.0, 1.0))
+                    .fill(accent(ui))
+                    .desired_height(6.0),
             )
-            .labelled_by(label.id);
-        } else if let Some(timer) = timer
-            && (!timer.note.is_empty() || timer.category.is_some())
-        {
-            ui.weak(format!(
-                "{}  ·  {}",
-                category_name(&self.state.dataset, timer.category),
-                timer.note
-            ));
+            .labelled_by(goal.id);
+        };
+        if ui.available_width() >= 640.0 && (editing || has_details) {
+            ui.columns(2, |columns| {
+                overview(&mut columns[0]);
+                self.timer_details(&mut columns[1], editing);
+            });
+        } else {
+            overview(ui);
+            self.timer_details(ui, editing);
         }
 
-        ui.horizontal_wrapped(|ui| {
+        action_row(ui, |ui| {
             if running {
                 if ui
                     .button(if paused {
@@ -322,6 +298,38 @@ impl Tracker {
         });
         if let Some(command) = command {
             self.dispatch(command, now, ui.ctx(), false);
+        }
+    }
+
+    fn timer_details(&mut self, ui: &mut Ui, editing: bool) {
+        if editing {
+            ui.horizontal_wrapped(|ui| {
+                category_picker(
+                    ui,
+                    "timer-category",
+                    &self.state.dataset,
+                    &mut self.category,
+                );
+                if ui.button("Новая категория").clicked() {
+                    self.open_editor(Editor::new_category(None, &self.state.dataset, true));
+                }
+            });
+            let label = ui.label("Заметка");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.note)
+                    .hint_text("Что будете делать?")
+                    .desired_rows(2)
+                    .desired_width(ui.available_width()),
+            )
+            .labelled_by(label.id);
+        } else if let Some(timer) = &self.state.timer
+            && (!timer.note.is_empty() || timer.category.is_some())
+        {
+            ui.weak(format!(
+                "{}  ·  {}",
+                category_name(&self.state.dataset, timer.category),
+                timer.note
+            ));
         }
     }
 
@@ -551,6 +559,7 @@ fn completion<T: 'static, R: 'static>(
 fn category_picker(ui: &mut Ui, id: &str, dataset: &Dataset, selected: &mut Option<Uuid>) {
     ComboBox::from_id_salt(id)
         .selected_text(category_name(dataset, *selected))
+        .truncate()
         .show_ui(ui, |ui| {
             ui.selectable_value(selected, None, "Без категории");
             let mut choices: Vec<_> = dataset

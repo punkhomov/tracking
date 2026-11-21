@@ -20,6 +20,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -79,7 +82,18 @@ internal fun TimelineScreen(state: TrackingState, model: TrackerViewModel) {
     ) {
         item {
             DateNavigation(date, state.settings, { day = it.toString() })
-            Picker("Диапазон", fullDay, listOf(true to "Весь день", false to "От первой сессии")) { fullDay = it }
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                SegmentedButton(
+                    selected = fullDay,
+                    onClick = { fullDay = true },
+                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                ) { Text("Весь день") }
+                SegmentedButton(
+                    selected = !fullDay,
+                    onClick = { fullDay = false },
+                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                ) { Text("От первой сессии") }
+            }
         }
         error?.let { item { ErrorText(it) } }
         when {

@@ -1,7 +1,12 @@
 use egui::{
-    Color32, Context, FontId, Frame, Margin, RichText, Stroke, Style, TextStyle, Theme,
-    ThemePreference, Ui, Visuals, vec2,
+    Color32, Context, CornerRadius, FontId, Stroke, Style, TextStyle, Theme, ThemePreference, Ui,
+    Visuals, vec2,
 };
+
+const RADIUS: u8 = 10;
+pub(crate) const CONTROL_RADIUS: u8 = RADIUS - 2;
+pub(crate) const CARD_RADIUS: u8 = RADIUS + 4;
+pub(crate) const CONTROL_HEIGHT: f32 = 32.0;
 
 pub fn install(ctx: &Context, saved_theme: &str) {
     ctx.set_style_of(Theme::Light, style(false));
@@ -27,25 +32,45 @@ fn style(dark: bool) -> Style {
         },
         ..Style::default()
     };
-    let (ink, surface, background, accent) = if dark {
-        (rgb(0xe3ede8), rgb(0x202e29), rgb(0x16221e), rgb(0x8dd0b6))
-    } else {
-        (rgb(0x1d2e28), Color32::WHITE, rgb(0xf2f5f1), rgb(0x1f5c4b))
-    };
-    style.visuals.override_text_color = Some(ink);
-    style.visuals.selection.bg_fill = if dark { rgb(0x305044) } else { rgb(0xe1eee7) };
-    style.visuals.selection.stroke.color = accent;
-    style.visuals.extreme_bg_color = background;
-    style.visuals.panel_fill = surface;
-    style.visuals.widgets.noninteractive.bg_stroke.color =
-        if dark { rgb(0x43544c) } else { rgb(0xd8e2dc) };
-    style.visuals.error_fg_color = if dark { rgb(0xffada5) } else { rgb(0x9b251c) };
+    let colors = palette(dark);
+    style.visuals.override_text_color = Some(colors.ink);
+    style.visuals.weak_text_color = Some(colors.muted);
+    style.visuals.selection.bg_fill = colors.selection;
+    style.visuals.selection.stroke.color = colors.accent;
+    style.visuals.extreme_bg_color = colors.canvas;
+    style.visuals.panel_fill = colors.surface;
+    style.visuals.window_fill = colors.surface;
+    style.visuals.window_stroke.color = colors.border;
+    style.visuals.widgets.noninteractive.bg_stroke.color = colors.border;
+    style.visuals.widgets.noninteractive.fg_stroke.color = colors.ink;
+    style.visuals.error_fg_color = colors.error;
+    let widgets = &mut style.visuals.widgets;
+    for (widget, fill) in [
+        (&mut widgets.inactive, colors.control),
+        (&mut widgets.hovered, colors.hover),
+        (&mut widgets.active, colors.selection),
+        (&mut widgets.open, colors.selection),
+    ] {
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.fg_stroke.color = colors.ink;
+        widget.corner_radius = CornerRadius::same(CONTROL_RADIUS);
+        widget.expansion = 0.0;
+    }
+    widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::TRANSPARENT);
+    widgets.hovered.bg_stroke = Stroke::new(1.0, colors.muted);
+    widgets.active.bg_stroke = Stroke::new(1.0, colors.accent);
+    widgets.open.bg_stroke = widgets.active.bg_stroke;
+    style
+        .text_styles
+        .insert(TextStyle::Heading, FontId::proportional(20.0));
     for text_style in [TextStyle::Body, TextStyle::Button] {
         style
             .text_styles
             .insert(text_style, FontId::proportional(14.0));
     }
     style.spacing.item_spacing = vec2(10.0, 10.0);
+    style.spacing.interact_size.y = CONTROL_HEIGHT;
     style.spacing.button_padding = vec2(12.0, 7.0);
     style
 }
@@ -70,33 +95,51 @@ pub fn accent(ui: &Ui) -> Color32 {
     ui.visuals().selection.stroke.color
 }
 
-pub fn primary(ui: &mut Ui, label: &str) -> egui::Response {
-    let foreground = if ui.visuals().dark_mode {
-        rgb(0x16221e)
-    } else {
-        Color32::WHITE
-    };
-    ui.add(
-        egui::Button::new(RichText::new(label).strong().color(foreground))
-            .fill(accent(ui))
-            .corner_radius(8),
-    )
+#[derive(Clone, Copy)]
+pub(crate) struct Palette {
+    ink: Color32,
+    muted: Color32,
+    canvas: Color32,
+    surface: Color32,
+    border: Color32,
+    control: Color32,
+    hover: Color32,
+    pub(crate) selection: Color32,
+    accent: Color32,
+    pub(crate) on_accent: Color32,
+    error: Color32,
 }
 
-pub fn card<R>(ui: &mut Ui, body: impl FnOnce(&mut Ui) -> R) -> R {
-    Frame::new()
-        .fill(ui.visuals().panel_fill)
-        .stroke(Stroke::new(
-            1.0,
-            ui.visuals().widgets.noninteractive.bg_stroke.color,
-        ))
-        .corner_radius(14)
-        .inner_margin(Margin::same(16))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            body(ui)
-        })
-        .inner
+pub(crate) const fn palette(dark: bool) -> Palette {
+    if dark {
+        Palette {
+            ink: rgb(0xe3ede8),
+            muted: rgb(0xaabeb4),
+            canvas: rgb(0x16221e),
+            surface: rgb(0x202e29),
+            border: rgb(0x43544c),
+            control: rgb(0x293b33),
+            hover: rgb(0x3b544a),
+            selection: rgb(0x305044),
+            accent: rgb(0x8dd0b6),
+            on_accent: rgb(0x16221e),
+            error: rgb(0xffada5),
+        }
+    } else {
+        Palette {
+            ink: rgb(0x1d2e28),
+            muted: rgb(0x536760),
+            canvas: rgb(0xf2f5f1),
+            surface: Color32::WHITE,
+            border: rgb(0xd8e2dc),
+            control: rgb(0xecf1ed),
+            hover: rgb(0xe1ebe5),
+            selection: rgb(0xdcece3),
+            accent: rgb(0x1f5c4b),
+            on_accent: Color32::WHITE,
+            error: rgb(0x9b251c),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +147,42 @@ mod tests {
     use egui::{RawInput, epaint::FontColorTransferFunction};
 
     use super::*;
+
+    #[test]
+    fn text_roles_have_sufficient_contrast_in_both_schemes() {
+        fn luminance(color: Color32) -> f32 {
+            let linear = |channel: u8| {
+                let channel = f32::from(channel) / 255.0;
+                if channel <= 0.04045 {
+                    channel / 12.92
+                } else {
+                    ((channel + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r()) + 0.7152 * linear(color.g()) + 0.0722 * linear(color.b())
+        }
+        for dark in [false, true] {
+            let colors = palette(dark);
+            for (text, background) in [
+                (colors.ink, colors.surface),
+                (colors.ink, colors.selection),
+                (colors.ink, colors.control),
+                (colors.ink, colors.hover),
+                (colors.muted, colors.canvas),
+                (colors.muted, colors.surface),
+                (colors.accent, colors.selection),
+                (colors.on_accent, colors.accent),
+                (colors.error, colors.canvas),
+            ] {
+                let a = luminance(text);
+                let b = luminance(background);
+                assert!(
+                    (a.max(b) + 0.05) / (a.min(b) + 0.05) >= 4.5,
+                    "{text:?} on {background:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn font_atlas_uses_the_same_theme_as_the_visible_interface() {

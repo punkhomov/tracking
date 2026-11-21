@@ -9,8 +9,8 @@ use tracking_core::Dataset;
 
 use crate::{
     Tracker,
+    components::{card, primary},
     pages::Screen,
-    theme::{card, primary},
 };
 
 const GUIDE: &str = "https://github.com/punkhomov/tracking/blob/main/docs/supabase.md";

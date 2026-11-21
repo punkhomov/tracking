@@ -11,5 +11,8 @@ egui.workspace = true
 tracking-core.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+egui_kittest = "0.36.2"
+
 [lints]
 workspace = true

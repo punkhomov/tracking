@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Utc};
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{
+    Align, Align2, Color32, FontId, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
+};
 use tracking_core::{
     Dataset, Kind, Moments, ZoneStyle,
     reports::{
@@ -12,11 +14,13 @@ use tracking_core::{
 use uuid::Uuid;
 
 use crate::{
-    Tracker, category_name, date_format, default_color, duration,
+    Tracker, category_name,
+    components::{card, segmented},
+    date_format, default_color, duration,
     editors::weekday_label,
     kind_name,
     pages::span_label,
-    theme::{accent, card, parse_color},
+    theme::{CONTROL_HEIGHT, accent, parse_color},
     time_format,
 };
 
@@ -77,11 +81,23 @@ impl Tracker {
         let dataset = &self.state.dataset;
         self.daily.refresh(dataset, date, self.revision);
         card(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.heading("Таймлайн дня");
-                ui.selectable_value(&mut self.daily.full_day, true, "Весь день");
-                ui.selectable_value(&mut self.daily.full_day, false, "От первой сессии");
-            });
+            let header_layout = if ui.available_width() >= 400.0 {
+                Layout::left_to_right(Align::Center)
+            } else {
+                Layout::top_down(Align::Min)
+            };
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), CONTROL_HEIGHT),
+                header_layout,
+                |ui| {
+                    ui.heading("Таймлайн дня");
+                    segmented(
+                        ui,
+                        &mut self.daily.full_day,
+                        [(true, "Весь день"), (false, "От первой сессии")],
+                    );
+                },
+            );
             let live = self
                 .state
                 .timer
